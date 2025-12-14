@@ -58,6 +58,45 @@ def extract_echo_train(
     return peak_times, peak_amps
 
 
+def extract_peak_by_index(
+    data: NMRData,
+    peak_index: int = 2,
+    min_distance: int = 100,
+    threshold_rel: float = 0.1,
+    min_height: float = 1.0,
+) -> Tuple[float, float, int]:
+    """
+    Extract a specific peak (by index) from the echo train.
+
+    Args:
+        data: NMRData object.
+        peak_index: Index of the peak to extract (0-based). Default 2 for 3rd peak.
+        min_distance: Minimum distance between peaks.
+        threshold_rel: Relative height threshold.
+        min_height: Absolute minimum height threshold.
+
+    Returns:
+        Tuple of (time, amplitude, raw_data_index)
+    """
+    from scipy.signal import find_peaks
+
+    signal = np.abs(data.signal)
+    max_sig = np.max(signal)
+
+    # Ensure height is at least min_height
+    height = max(min_height, max_sig * threshold_rel)
+
+    peaks, _ = find_peaks(signal, height=height, distance=min_distance)
+
+    if len(peaks) <= peak_index:
+        raise ValueError(
+            f"Not enough peaks found. Found {len(peaks)}, required index {peak_index}"
+        )
+
+    idx = peaks[peak_index]
+    return data.time[idx], signal[idx], idx
+
+
 def get_delay_from_metadata(data: NMRData) -> float:
     """
     Attempt to extract the delay parameter (tau) from metadata.
