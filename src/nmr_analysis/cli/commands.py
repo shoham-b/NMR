@@ -11,9 +11,8 @@ from rich.progress import Progress
 from nmr_analysis.io.loader import KeysightLoader
 from nmr_analysis.analysis.models import t2_decay_model
 from nmr_analysis.analysis.processing import (
-    extract_peak_amplitude,
-    parse_time_from_filename,
     extract_echo_train,
+    extract_peak_by_index,
 )
 from nmr_analysis.analysis.fitting import Fitter
 from nmr_analysis.core.types import ExperimentType, AnalysisResult, NMRData
@@ -56,8 +55,9 @@ def analyze(
         subdirs = {
             "t1": ExperimentType.T1,
             "t2": ExperimentType.T2,
-            "t~": ExperimentType.T2_STAR,
-            "t2combined": ExperimentType.T2_COMBINED,
+            "t2~": ExperimentType.T2_STAR,
+            "t2_star": ExperimentType.T2_STAR,
+            "t2multiple": ExperimentType.T2_COMBINED,
         }
 
         found_any = False
@@ -101,11 +101,7 @@ def _run_analysis(path: Path, experiment: ExperimentType, channel: str, plot: bo
         # Assuming single file for now or finding first file in dir
         target_file = path
         if path.is_dir():
-            files = (
-                list(path.glob("*.h5"))
-                + list(path.glob("*.hdf5"))
-                + list(path.glob("*.HDF5"))
-            )
+            files = list(path.glob("*.h5")) + list(path.glob("*.hdf5"))
             if not files:
                 raise FileNotFoundError(f"No HDF5 files in {path}")
             target_file = files[0]  # Pick first one or loop?
@@ -135,11 +131,7 @@ def _run_analysis(path: Path, experiment: ExperimentType, channel: str, plot: bo
         # So likely one file in t2combined dir.
         target_file = path
         if path.is_dir():
-            files = (
-                list(path.glob("*.h5"))
-                + list(path.glob("*.hdf5"))
-                + list(path.glob("*.HDF5"))
-            )
+            files = list(path.glob("*.h5")) + list(path.glob("*.hdf5"))
             if not files:
                 raise FileNotFoundError(f"No HDF5 files in {path}")
             target_file = files[0]
@@ -153,10 +145,16 @@ def _run_analysis(path: Path, experiment: ExperimentType, channel: str, plot: bo
         peak_times, peak_amps = extract_echo_train(data)
 
         if len(peak_times) < 3:
-            console.print("[red]Not enough peaks found for T2 fit.[/red]")
+            console.print(
+                "[red]Not enough peaks found for T2 fit (need at least 3, so >2).[/red]"
+            )
             return
 
-        console.print(f"Found {len(peak_times)} peaks. Fitting T2...")
+        # Skip the first 2 peaks (start from 3rd peak onward)
+        peak_times = peak_times[2:]
+        peak_amps = peak_amps[2:]
+
+        console.print(f"Using {len(peak_times)} peaks (skipped first 2). Fitting T2...")
 
         # Fit T2 to the peaks
         # Using 0 as initial time? Use relative time?
@@ -187,11 +185,7 @@ def _run_analysis(path: Path, experiment: ExperimentType, channel: str, plot: bo
             )
             raise typer.Exit(1)
 
-        files = (
-            list(path.glob(("*.h5")))
-            + list(path.glob(("*.hdf5")))
-            + list(path.glob("*.HDF5"))
-        )
+        files = list(path.glob(("*.h5"))) + list(path.glob(("*.hdf5")))
         if not files:
             console.print("[red]No .h5 or .hdf5 files found in directory.[/red]")
             raise typer.Exit(1)
@@ -207,11 +201,12 @@ def _run_analysis(path: Path, experiment: ExperimentType, channel: str, plot: bo
             for f in files:
                 try:
                     data = loader.load(f)
-                    amp = extract_peak_amplitude(data, method="max_abs")
-                    t = parse_time_from_filename(f.name)
+                    # Extract from 3rd peak (index 2)
+                    t, amp, idx = extract_peak_by_index(data, peak_index=2)
+
                     delays.append(t)
                     amplitudes.append(amp)
-                    raw_traces.append((t, data))
+                    raw_traces.append((data, t, amp))
                 except Exception as e:
                     console.print(f"[yellow]Skipping {f.name}: {e}[/yellow]")
 
@@ -224,7 +219,7 @@ def _run_analysis(path: Path, experiment: ExperimentType, channel: str, plot: bo
         amplitudes = amplitudes[sorted_indices]
 
         # Sort raw traces
-        raw_traces.sort(key=lambda x: x[0])
+        raw_traces.sort(key=lambda x: x[1])
 
         console.print("Fitting data...")
         if experiment == ExperimentType.T1:
@@ -245,10 +240,9 @@ def _run_analysis(path: Path, experiment: ExperimentType, channel: str, plot: bo
 
         print_result(result)
         if plot:
-            # Show fit
-            plot_result(delays, amplitudes, result, "Delay (s)", "Amplitude")
-            # Show all traces
-            plot_traces(raw_traces, dataset_name)
+            plot_analysis_summary(
+                delays, amplitudes, result, raw_traces, "Delay (s)", "Amplitude"
+            )
 
 
 def print_result(result: AnalysisResult):
@@ -280,34 +274,46 @@ def plot_combined_t2(
 ):
     """
     Plot Raw Data, Peaks, and Fit Curve on a single graph.
+    Matches style of plot_analysis_summary.
     """
-    plt.figure(figsize=(10, 6))
+    plt.figure(figsize=(12, 8))
 
-    # 1. Raw Data
-    # Plot absolute magnitude vs time
+    # 1. Raw Data (Background)
     plt.plot(
         data.time,
         np.abs(data.signal),
         label="Raw Echo Train",
         color="lightgray",
         alpha=0.6,
+        linewidth=1,
     )
 
-    # 2. Peaks (Scatter)
+    # 2. Peaks (Scatter with Gradient)
+    # Use rank/index for color mapping
+    num_peaks = len(peak_times)
+    cmap = cm.viridis
+    norm = plt.Normalize(0, num_peaks - 1 if num_peaks > 1 else 1)
+
+    # Create colors for each peak
+    colors = [cmap(norm(i)) for i in range(num_peaks)]
+
     plt.scatter(
         peak_times,
         peak_amps,
-        label="Extracted Peaks",
-        color="blue",
+        c=colors,
         marker="x",
-        s=60,
-        zorder=3,
+        s=100,
+        linewidths=2,
+        zorder=5,
+        label="_nolegend_",  # Legend handled via dummy or assume 'Raw Echo Train' covers it?
+        # Better to add dummy for "Extracted Peaks" styling
     )
 
+    # Dummy marker for legend
+    plt.scatter([], [], color="black", marker="x", label="Extracted Peaks")
+
     # 3. Fit Curve
-    # Calculate fit over the entire time range for a smooth envelope
     if "M0" in result.params and "T2" in result.params:
-        # Re-construct the model function
         M0 = result.params["M0"]
         T2 = result.params["T2"]
         offset = result.params.get("offset", 0.0)
@@ -320,49 +326,121 @@ def plot_combined_t2(
             label=f"T2 Fit (T2={T2 * 1e6:.2f} \u03bcs)",
             color="red",
             linewidth=2,
-            linestyle="--",
-            zorder=4,
+            linestyle="-",
+            zorder=6,
         )
     else:
-        # Fallback if params missing
-        plt.plot(peak_times, result.fit_curve, label="Fit", color="red", zorder=4)
+        # Fallback
+        plt.plot(peak_times, result.fit_curve, label="Fit", color="red", zorder=6)
 
     plt.xlabel("Time (s)")
     plt.ylabel("Signal Magnitude")
     plt.title("T2 Combined Analysis: Raw Data, Peaks, and Fit")
-    plt.legend()
-    plt.grid(True)
+    plt.legend(loc="best")
+    plt.grid(True, alpha=0.5)
+
+    plt.ylim(auto=True)
+
+    # Add colorbar for delay context
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    ax = plt.gca()
+    cbar = plt.colorbar(sm, ax=ax, label="Peak Sequence (Delay)")
+
+    # Custom ticks for colorbar (Delay values)
+    if num_peaks > 1:
+        tick_indices = np.linspace(0, num_peaks - 1, num=min(6, num_peaks), dtype=int)
+        tick_indices = np.unique(tick_indices)
+        tick_labels = [f"{peak_times[i]:.2e}" for i in tick_indices]
+        cbar.set_ticks(tick_indices)
+        cbar.set_ticklabels(tick_labels)
+
+    plt.tight_layout()
     plt.show()
 
 
-def plot_traces(raw_traces: List[Tuple[float, NMRData]], title: str):
+def plot_analysis_summary(
+    x,
+    y,
+    result: AnalysisResult,
+    raw_traces: List[Tuple[NMRData, float, float]],
+    xlabel,
+    ylabel,
+):
     """
-    Plot all raw traces with gradient coloring.
+    Plot Fit Result and Raw Traces in a single figure.
     """
-    if not raw_traces:
-        return
+    plt.figure(figsize=(12, 8))
 
-    plt.figure(figsize=(10, 6))
-
-    # Setup colormap
-    delays = [t for t, _ in raw_traces]
-    min_d, max_d = min(delays), max(delays)
-    norm = plt.Normalize(min_d, max_d)
+    # 1. Plot all Raw Traces (faint)
     cmap = cm.viridis
+    # Use RANK (index) for color mapping
+    num_traces = len(raw_traces)
+    norm = plt.Normalize(0, num_traces - 1 if num_traces > 1 else 1)
 
-    for t, data in raw_traces:
-        color = cmap(norm(t))
-        plt.plot(data.time, np.abs(data.signal), color=color, alpha=0.7)
+    # Iterate raw_traces (which were sorted by time)
+    for i, (data, t, amp) in enumerate(raw_traces):
+        color = cmap(norm(i))
+        plt.plot(data.time, np.abs(data.signal), color=color, alpha=0.3, linewidth=1)
 
-    # Add colorbar
+        # 2. Highlight specific peak used (Scatter)
+        plt.scatter(
+            [t],
+            [amp],
+            color=color,
+            marker="x",
+            s=100,
+            linewidths=2,
+            zorder=5,
+            label="_nolegend_",
+        )
+
+    # 3. Plot the Fit Curve
+    # Reconstruct smooth curve or just plot the fit points?
+    # Ideally we plot the fit curve over the delay times.
+    sorted_pairs = sorted(zip(x, result.fit_curve))
+    sx, sy = zip(*sorted_pairs)
+    plt.plot(
+        sx,
+        sy,
+        label="T2 Fit",
+        color="red",
+        linewidth=2,
+        linestyle="-",
+        zorder=6,
+    )
+
+    # Add dummy marker for legend to explain the 'x'
+    plt.scatter([], [], color="black", marker="x", label="Peaks (Data)")
+
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.title(f"{result.dataset_name} - Single Plot Analysis")
+    plt.legend(loc="best")
+    plt.grid(True, alpha=0.5)
+
+    plt.ylim(auto=True)
+
+    # Add colorbar for delay context
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
-    plt.colorbar(sm, label="Delay (s)")
 
-    plt.xlabel("Time (s)")
-    plt.ylabel("Signal Magnitude")
-    plt.title(f"{title} - All Traces")
-    plt.grid(True, alpha=0.3)
+    ax = plt.gca()
+    cbar = plt.colorbar(sm, ax=ax, label="Peak Delay (s)")
+
+    # Set ticks to show actual values based on index
+    if num_traces > 1:
+        # Select indices for ticks
+        tick_indices = np.linspace(0, num_traces - 1, num=min(6, num_traces), dtype=int)
+        tick_indices = np.unique(tick_indices)
+
+        # Labels are the delays at those indices
+        tick_labels = [f"{raw_traces[i][1]:.2e}" for i in tick_indices]
+
+        cbar.set_ticks(tick_indices)
+        cbar.set_ticklabels(tick_labels)
+
+    plt.tight_layout()
     plt.show()
 
 
