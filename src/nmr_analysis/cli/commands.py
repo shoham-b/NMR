@@ -1,21 +1,22 @@
 from pathlib import Path
 from typing import List, Optional, Tuple
-import typer
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.cm as cm
-from rich.console import Console
-from rich.table import Table
-from rich.progress import Progress
 
-from nmr_analysis.io.loader import KeysightLoader
+import matplotlib.cm as cm
+import matplotlib.pyplot as plt
+import numpy as np
+import typer
+from rich.console import Console
+from rich.progress import Progress
+from rich.table import Table
+
+from nmr_analysis.analysis.fitting import Fitter
 from nmr_analysis.analysis.models import t2_decay_model
 from nmr_analysis.analysis.processing import (
     extract_echo_train,
-    extract_peak_by_index,
+    extract_second_highest_peak,
 )
-from nmr_analysis.analysis.fitting import Fitter
 from nmr_analysis.core.types import ExperimentType, AnalysisResult, NMRData
+from nmr_analysis.io.loader import KeysightLoader
 from nmr_analysis.visualization.interactive import generate_dashboard, AnalysisContext
 
 app = typer.Typer()
@@ -46,6 +47,12 @@ def analyze(
     ),
     channel: str = typer.Option("Channel 2", help="Scope channel name"),
     plot: bool = typer.Option(True, help="Show plot of the fit"),
+    save_plots: bool = typer.Option(
+        False, "--save-plots", help="Save plots to output directory"
+    ),
+    output_dir: Path = typer.Option(
+        Path("output"), "--output-dir", help="Directory to save plots"
+    ),
     interactive: bool = typer.Option(
         False, "--interactive", "-i", help="Generate interactive HTML report."
     ),
@@ -75,7 +82,15 @@ def analyze(
                     f"[bold cyan]Batch Analysis: {name} ({exp_type.value})[/bold cyan]"
                 )
                 try:
-                    ctx = _run_analysis(dataset_path, exp_type, channel, plot)
+                    # Create subdirectory for this experiment type if saving
+                    save_path = None
+                    if save_plots:
+                        save_path = output_dir / name
+                        save_path.mkdir(parents=True, exist_ok=True)
+
+                    ctx = _run_analysis(
+                        dataset_path, exp_type, channel, plot, save_path=save_path
+                    )
                     if ctx:
                         collected_contexts.append(ctx)
                 except Exception as e:
@@ -104,7 +119,12 @@ def analyze(
         console.print("[red]Experiment type is required for single analysis.[/red]")
         raise typer.Exit(1)
 
-    ctx = _run_analysis(path, experiment, channel, plot)
+    save_path = None
+    if save_plots:
+        save_path = output_dir
+        save_path.mkdir(parents=True, exist_ok=True)
+
+    ctx = _run_analysis(path, experiment, channel, plot, save_path=save_path)
     if interactive and ctx:
         output_html = (path if path.is_dir() else path.parent) / "index.html"
         generate_dashboard([ctx], output_html)
@@ -112,7 +132,11 @@ def analyze(
 
 
 def _run_analysis(
-    path: Path, experiment: ExperimentType, channel: str, plot: bool
+    path: Path,
+    experiment: ExperimentType,
+    channel: str,
+    plot: bool,
+    save_path: Optional[Path] = None,
 ) -> Optional[AnalysisContext]:
     loader = KeysightLoader(channel=channel)
 
@@ -140,8 +164,18 @@ def _run_analysis(
         result = Fitter.fit_t2_star(data)
         print_result(result)
         if plot:
+            filepath = None
+            if save_path:
+                filepath = save_path / f"{target_file.stem}_fit.png"
+                console.print(f"Saving plot to {filepath.as_uri()}")
+
             plot_result(
-                data.time, np.abs(data.signal), result, "Time (s)", "Signal (Magnitude)"
+                data.time,
+                np.abs(data.signal),
+                result,
+                "Time (s)",
+                "Signal (Magnitude)",
+                filepath=filepath,
             )
         return AnalysisContext(data=data, result=result)
 
@@ -196,7 +230,12 @@ def _run_analysis(
         print_result(result)
         if plot:
             # We want: Raw Data + Peaks + Fit Curve on ONE graph
-            plot_combined_t2(data, peak_times, peak_amps, result)
+            filepath = None
+            if save_path:
+                filepath = save_path / f"{target_file.stem}_combined_fit.png"
+                console.print(f"Saving plot to {filepath}")
+
+            plot_combined_t2(data, peak_times, peak_amps, result, filepath=filepath)
 
         return AnalysisContext(
             data=data, result=result, peak_times=peak_times, peak_amps=peak_amps
@@ -226,8 +265,8 @@ def _run_analysis(
             for f in files:
                 try:
                     data = loader.load(f)
-                    # Extract from 3rd peak (index 2)
-                    t, amp, idx = extract_peak_by_index(data, peak_index=2)
+                    # Extract the second highest peak
+                    t, amp, idx = extract_second_highest_peak(data)
 
                     delays.append(t)
                     amplitudes.append(amp)
@@ -265,8 +304,21 @@ def _run_analysis(
 
         print_result(result)
         if plot:
+            filepath = None
+            if save_path:
+                # Name based on directory?
+                dirname = path.name
+                filepath = save_path / f"{dirname}_{experiment.value}_fit.png"
+                console.print(f"Saving plot to {filepath}")
+
             plot_analysis_summary(
-                delays, amplitudes, result, raw_traces, "Delay (s)", "Amplitude"
+                delays,
+                amplitudes,
+                result,
+                raw_traces,
+                "Delay (s)",
+                "Amplitude",
+                filepath=filepath,
             )
 
         # For T1/T2, constructing 'data' representing the XY for plot
@@ -289,7 +341,9 @@ def print_result(result: AnalysisResult):
     console.print(table)
 
 
-def plot_result(x, y, result: AnalysisResult, xlabel, ylabel, filepath: str = None):
+def plot_result(
+    x, y, result: AnalysisResult, xlabel, ylabel, filepath: Optional[Path] = None
+):
     plt.figure(figsize=(8, 5))
     plt.scatter(x, y, label="Data", color="blue")
     plt.plot(x, result.fit_curve, label="Fit", color="red")
@@ -306,7 +360,11 @@ def plot_result(x, y, result: AnalysisResult, xlabel, ylabel, filepath: str = No
 
 
 def plot_combined_t2(
-    data: NMRData, peak_times: np.ndarray, peak_amps: np.ndarray, result: AnalysisResult
+    data: NMRData,
+    peak_times: np.ndarray,
+    peak_amps: np.ndarray,
+    result: AnalysisResult,
+    filepath: Optional[Path] = None,
 ):
     """
     Plot Raw Data, Peaks, and Fit Curve on a single graph.
@@ -319,9 +377,8 @@ def plot_combined_t2(
         data.time,
         np.abs(data.signal),
         label="Raw Echo Train",
-        color="lightgray",
+        color="skyblue",
         alpha=0.6,
-        linewidth=1,
     )
 
     # 2. Peaks (Scatter with Gradient)
@@ -361,7 +418,6 @@ def plot_combined_t2(
             full_fit_curve,
             label=f"T2 Fit (T2={T2 * 1e6:.2f} \u03bcs)",
             color="red",
-            linewidth=2,
             linestyle="-",
             zorder=6,
         )
@@ -392,7 +448,12 @@ def plot_combined_t2(
         cbar.set_ticklabels(tick_labels)
 
     plt.tight_layout()
-    plt.show()
+    if filepath:
+        plt.savefig(filepath)
+        plt.close()
+    else:
+        # Only show if not saving
+        plt.show()
 
 
 def plot_analysis_summary(
@@ -402,6 +463,7 @@ def plot_analysis_summary(
     raw_traces: List[Tuple[NMRData, float, float]],
     xlabel,
     ylabel,
+    filepath: Optional[Path] = None,
 ):
     """
     Plot Fit Result and Raw Traces in a single figure.
@@ -417,7 +479,7 @@ def plot_analysis_summary(
     # Iterate raw_traces (which were sorted by time)
     for i, (data, t, amp) in enumerate(raw_traces):
         color = cmap(norm(i))
-        plt.plot(data.time, np.abs(data.signal), color=color, alpha=0.3, linewidth=1)
+        plt.plot(data.time, np.abs(data.signal), color=color, alpha=0.5)
 
         # 2. Highlight specific peak used (Scatter)
         plt.scatter(
@@ -441,7 +503,6 @@ def plot_analysis_summary(
         sy,
         label="T2 Fit",
         color="red",
-        linewidth=2,
         linestyle="-",
         zorder=6,
     )
@@ -477,10 +538,20 @@ def plot_analysis_summary(
         cbar.set_ticklabels(tick_labels)
 
     plt.tight_layout()
-    plt.show()
+    if filepath:
+        plt.savefig(filepath)
+        plt.close()
+    else:
+        plt.show()
 
 
 if __name__ == "__main__":
     analyze(
-        Path(r"H:\My Drive\Lab C\NMR"), experiment=None, channel="Channel 2", plot=True
+        Path(r"H:\My Drive\Lab C\NMR"),
+        experiment=None,
+        channel="Channel 2",
+        plot=True,
+        save_plots=True,
+        output_dir=Path(__file__).parents[3] / "output",
+        interactive=True,
     )
