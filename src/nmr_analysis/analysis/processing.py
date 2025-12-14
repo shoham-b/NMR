@@ -1,4 +1,6 @@
+from typing import Tuple
 import numpy as np
+
 from nmr_analysis.core.types import NMRData
 
 
@@ -25,6 +27,35 @@ def extract_peak_amplitude(data: NMRData, method: str = "max_abs") -> float:
         return np.trapz(np.abs(signal), data.time)
     else:
         raise ValueError(f"Unknown method: {method}")
+
+
+def extract_echo_train(
+    data: NMRData, min_distance: int = 100, threshold_rel: float = 0.1
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Extract peaks from a CPMG echo train.
+
+    Args:
+        data: NMRData object.
+        min_distance: Minimum number of samples between peaks.
+        threshold_rel: Relative threshold (0-1) of max peak to consider.
+
+    Returns:
+        Tuple of (peak_times, peak_amplitudes)
+    """
+    from scipy.signal import find_peaks
+
+    signal = np.abs(data.signal)
+    max_sig = np.max(signal)
+    height = max_sig * threshold_rel
+
+    # find_peaks returns indices
+    peaks, _ = find_peaks(signal, height=height, distance=min_distance)
+
+    peak_times = data.time[peaks]
+    peak_amps = signal[peaks]
+
+    return peak_times, peak_amps
 
 
 def get_delay_from_metadata(data: NMRData) -> float:
