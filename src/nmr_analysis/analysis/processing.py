@@ -8,7 +8,7 @@ def extract_echo_train(
     data: NMRData,
     min_distance: int = 100,
     threshold_rel: float = 0.1,
-    min_height: float = 0.5,
+    min_height: float = 0.3,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Extract peaks from a CPMG echo train.
@@ -31,7 +31,7 @@ def extract_echo_train(
     height = max(min_height, max_sig * threshold_rel)
 
     # find_peaks returns indices
-    peaks, _ = find_peaks(signal, height=height, distance=min_distance)
+    peaks, _ = find_peaks(signal, height=height, distance=min_distance, prominence=0.6)
 
     peak_times = data.time[peaks]
     peak_amps = signal[peaks]
@@ -41,7 +41,7 @@ def extract_echo_train(
 
 def extract_peak_by_index(
     data: NMRData,
-    peak_index: int = 2,
+    peak_index: int = 3,
     min_distance: int = 10,
     threshold_rel: float = 0.1,
     min_height: float = 0.6,
@@ -67,7 +67,7 @@ def extract_peak_by_index(
     # Ensure height is at least min_height
     height = max(min_height, max_sig * threshold_rel)
 
-    peaks, _ = find_peaks(signal, height=height, distance=min_distance)
+    peaks, _ = find_peaks(signal, height=height, distance=min_distance, prominence=0.6)
 
     if len(peaks) <= peak_index:
         raise ValueError(
@@ -76,6 +76,56 @@ def extract_peak_by_index(
 
     idx = peaks[peak_index]
     return data.time[idx], signal[idx], idx
+
+
+def extract_second_highest_peak(
+    data: NMRData,
+    min_distance: int = 10,
+    threshold_rel: float = 0.1,
+    min_height: float = 0.6,
+) -> Tuple[float, float, int]:
+    """
+    Extract the peak with the second highest amplitude.
+
+    Args:
+        data: NMRData object.
+        min_distance: Minimum distance between peaks.
+        threshold_rel: Relative height threshold.
+        min_height: Absolute minimum height threshold.
+
+    Returns:
+        Tuple of (time, amplitude, raw_data_index)
+    """
+    from scipy.signal import find_peaks
+
+    signal = np.abs(data.signal)
+    max_sig = np.max(signal)
+
+    # Ensure height is at least min_height
+    height = max(min_height, max_sig * threshold_rel)
+
+    peaks, properties = find_peaks(
+        signal, height=height, distance=min_distance, prominence=0.6
+    )
+
+    if len(peaks) < 2:
+        raise ValueError(
+            f"Not enough peaks found. Found {len(peaks)}, required at least 2"
+        )
+
+    # Get amplitudes of peaks
+    peak_amps = signal[peaks]
+
+    # Sort indices by amplitude (descending)
+    sorted_indices = np.argsort(peak_amps)[::-1]
+
+    # Select the second highest peak (index 1 in sorted list)
+    second_highest_idx = sorted_indices[1]
+
+    # Get the original peak index
+    final_peak_idx = peaks[second_highest_idx]
+
+    return data.time[final_peak_idx], signal[final_peak_idx], final_peak_idx
 
 
 def get_delay_from_metadata(data: NMRData) -> float:
