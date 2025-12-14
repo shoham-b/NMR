@@ -13,7 +13,7 @@ from nmr_analysis.analysis.fitting import Fitter
 from nmr_analysis.analysis.models import t2_decay_model
 from nmr_analysis.analysis.processing import (
     extract_echo_train,
-    extract_second_highest_peak,
+    extract_peak_by_index,
 )
 from nmr_analysis.core.types import ExperimentType, AnalysisResult, NMRData
 from nmr_analysis.io.loader import KeysightLoader
@@ -265,8 +265,10 @@ def _run_analysis(
             for f in files:
                 try:
                     data = loader.load(f)
-                    # Extract the second highest peak
-                    t, amp, idx = extract_second_highest_peak(data)
+                    # Extract from 3rd peak (index 2) with smoothing
+                    t, amp, idx = extract_peak_by_index(
+                        data, peak_index=2, smoothing=2.0
+                    )
 
                     delays.append(t)
                     amplitudes.append(amp)

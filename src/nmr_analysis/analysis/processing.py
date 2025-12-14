@@ -45,6 +45,7 @@ def extract_peak_by_index(
     min_distance: int = 10,
     threshold_rel: float = 0.1,
     min_height: float = 0.6,
+    smoothing: float = 0.0,
 ) -> Tuple[float, float, int]:
     """
     Extract a specific peak (by index) from the echo train.
@@ -55,13 +56,19 @@ def extract_peak_by_index(
         min_distance: Minimum distance between peaks.
         threshold_rel: Relative height threshold.
         min_height: Absolute minimum height threshold.
+        smoothing: Sigma for Gaussian smoothing (0 to disable).
 
     Returns:
         Tuple of (time, amplitude, raw_data_index)
     """
     from scipy.signal import find_peaks
+    from scipy.ndimage import gaussian_filter1d
 
     signal = np.abs(data.signal)
+
+    if smoothing > 0:
+        signal = gaussian_filter1d(signal, sigma=smoothing)
+
     max_sig = np.max(signal)
 
     # Ensure height is at least min_height
@@ -83,15 +90,18 @@ def extract_second_highest_peak(
     min_distance: int = 10,
     threshold_rel: float = 0.1,
     min_height: float = 0.6,
+    min_time_sep: float = 0.1,  # Minimum separation from highest peak in seconds
 ) -> Tuple[float, float, int]:
     """
-    Extract the peak with the second highest amplitude.
+    Extract the peak with the second highest amplitude that is at least
+    `min_time_sep` seconds away from the highest peak.
 
     Args:
         data: NMRData object.
-        min_distance: Minimum distance between peaks.
+        min_distance: Minimum distance between peaks (indices).
         threshold_rel: Relative height threshold.
         min_height: Absolute minimum height threshold.
+        min_time_sep: Minimum time separation from the highest peak (seconds).
 
     Returns:
         Tuple of (time, amplitude, raw_data_index)
@@ -113,19 +123,31 @@ def extract_second_highest_peak(
             f"Not enough peaks found. Found {len(peaks)}, required at least 2"
         )
 
-    # Get amplitudes of peaks
+    # Get amplitudes and times of peaks
     peak_amps = signal[peaks]
+    peak_times = data.time[peaks]
+
+    # Find the highest peak
+    highest_idx_in_peaks = np.argmax(peak_amps)
+    highest_time = peak_times[highest_idx_in_peaks]
 
     # Sort indices by amplitude (descending)
     sorted_indices = np.argsort(peak_amps)[::-1]
 
-    # Select the second highest peak (index 1 in sorted list)
-    second_highest_idx = sorted_indices[1]
+    # Iterate through candidates (skipping the first one which is the highest itself)
+    for idx_in_peaks in sorted_indices[1:]:
+        candidate_time = peak_times[idx_in_peaks]
+        dist = abs(candidate_time - highest_time)
 
-    # Get the original peak index
-    final_peak_idx = peaks[second_highest_idx]
+        if dist >= min_time_sep:
+            # Found our winner
+            final_peak_idx = peaks[idx_in_peaks]
+            return data.time[final_peak_idx], signal[final_peak_idx], final_peak_idx
 
-    return data.time[final_peak_idx], signal[final_peak_idx], final_peak_idx
+    # If we loop through everything and find nothing suitable
+    raise ValueError(
+        f"No second peak found at least {min_time_sep}s away from the highest peak."
+    )
 
 
 def get_delay_from_metadata(data: NMRData) -> float:
