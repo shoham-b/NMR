@@ -1,6 +1,8 @@
+from pathlib import Path
+
 import h5py
 import numpy as np
-from pathlib import Path
+
 from nmr_analysis.core.types import NMRData
 
 
@@ -24,71 +26,48 @@ class KeysightLoader:
         if not file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
 
+        if not file_path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+
         try:
             with h5py.File(file_path, "r") as f:
-                # Structure of Keysight HDF5 usually varies, but typically:
-                # /Waveforms/Channel 1/Element 1/Raw Data
-                # Or simply stored under a group.
-                # This is a generic implementation that might need adjustment based on specific file structure.
-                # Assuming 'Waveforms' group exists.
+                # Strict requirement: /__BV_Dataset__Data__/data_chan{n}_capture1/data_chan{n}_capture1
 
-                # We need to explore the file to find the data if structure is unknown,
-                # but based on prompt "specific channel", we assume a path.
+                # Parse channel number from self.channel (e.g. "Channel 1" -> "1")
+                import re
 
-                # For now, let's implement a robust search or default path.
-                # Keysight often uses 'Waveforms' -> Channel -> 'RawData'
+                match = re.search(r"(\d+)", self.channel)
+                if not match:
+                    raise ValueError(
+                        f"Could not parse channel number from '{self.channel}'"
+                    )
+                channel_num = match.group(1)
 
-                # Looking for the channel group
-                base_group = f.get("Waveforms")
-                if not base_group:
-                    # Fallback or root search
-                    base_group = f
+                # Construct expected path
+                # Path: /__BV_Dataset__Data__/data_chan{n}_capture1/data_chan{n}_capture1
 
-                channel_group = base_group.get(self.channel)
-                if not channel_group:
-                    # Try to find channel by partial match or taking the first one
-                    keys = list(base_group.keys())
-                    if keys:
-                        channel_group = base_group[keys[0]]
-                    else:
-                        raise ValueError(
-                            f"Could not find channel group '{self.channel}' or any valid group."
-                        )
+                # Note: h5py allows access via full path
+                group_path = f"/__BV_Dataset__Data__/data_chan{channel_num}_capture1"
+                dataset_name = f"data_chan{channel_num}_capture1"
 
-                # Assuming the first element contains the data
-                element_key = (
-                    list(channel_group.keys())[0] if channel_group.keys() else None
-                )
-                if not element_key:
-                    raise ValueError("Empty channel group.")
+                if group_path not in f:
+                    raise ValueError(
+                        f"Group not found: {group_path}. File keys: {list(f.keys())}"
+                    )
 
-                data_group = channel_group[element_key]
+                group = f[group_path]
 
-                # Check for RawData or look for any dataset
-                if isinstance(data_group, h5py.Dataset):
-                    raw_data = data_group[:]
-                    attrs = dict(data_group.attrs)
-                else:
-                    # It's a group, look for dataset
-                    dataset = None
-                    if "RawData" in data_group:
-                        dataset = data_group["RawData"]
-                    else:
-                        # Find first dataset
-                        for key in data_group.keys():
-                            if isinstance(data_group[key], h5py.Dataset):
-                                dataset = data_group[key]
-                                break
+                if dataset_name not in group:
+                    raise ValueError(
+                        f"Dataset '{dataset_name}' not found in group '{group_path}'. keys: {list(group.keys())}"
+                    )
 
-                    if dataset is None:
-                        raise ValueError(
-                            f"No dataset found in group {data_group.name}. Keys: {list(data_group.keys())}"
-                        )
+                dataset = group[dataset_name]
 
-                    raw_data = dataset[:]
-                    attrs = dict(data_group.attrs)
-                    # Merge dataset attrs if any? usually on group or dataset.
-                    attrs.update(dict(dataset.attrs))
+                raw_data = dataset[:]
+                attrs = dict(dataset.attrs)
+                # Merge group attrs
+                attrs.update(dict(group.attrs))
 
                 # Metadata extraction
                 x_inc = attrs.get("XIncrement", 1.0)
