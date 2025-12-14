@@ -16,6 +16,7 @@ from nmr_analysis.analysis.processing import (
 )
 from nmr_analysis.analysis.fitting import Fitter
 from nmr_analysis.core.types import ExperimentType, AnalysisResult, NMRData
+from nmr_analysis.visualization.interactive import generate_dashboard, AnalysisContext
 
 app = typer.Typer()
 console = Console()
@@ -45,10 +46,15 @@ def analyze(
     ),
     channel: str = typer.Option("Channel 2", help="Scope channel name"),
     plot: bool = typer.Option(True, help="Show plot of the fit"),
+    interactive: bool = typer.Option(
+        False, "--interactive", "-i", help="Generate interactive HTML report."
+    ),
 ):
     """
     Run analysis on NMR data. Supports batch processing of subdirectories.
     """
+    collected_contexts: List[AnalysisContext] = []
+
     # Batch Analysis Logic
     if path.is_dir() and experiment is None:
         # Check for subdirectories
@@ -69,12 +75,20 @@ def analyze(
                     f"[bold cyan]Batch Analysis: {name} ({exp_type.value})[/bold cyan]"
                 )
                 try:
-                    _run_analysis(dataset_path, exp_type, channel, plot)
+                    ctx = _run_analysis(dataset_path, exp_type, channel, plot)
+                    if ctx:
+                        collected_contexts.append(ctx)
                 except Exception as e:
                     console.print(f"[red]Failed to analyze {name}: {e}[/red]")
 
         if found_any:
             console.print("[green]Batch analysis completed.[/green]")
+            if interactive and collected_contexts:
+                output_html = path / "index.html"
+                generate_dashboard(collected_contexts, output_html)
+                console.print(
+                    f"[green]Interactive report saved to {output_html}[/green]"
+                )
             return
 
         # If no subdirs found and no experiment specified, fail or assume single directory?
@@ -90,10 +104,16 @@ def analyze(
         console.print("[red]Experiment type is required for single analysis.[/red]")
         raise typer.Exit(1)
 
-    _run_analysis(path, experiment, channel, plot)
+    ctx = _run_analysis(path, experiment, channel, plot)
+    if interactive and ctx:
+        output_html = (path if path.is_dir() else path.parent) / "index.html"
+        generate_dashboard([ctx], output_html)
+        console.print(f"[green]Interactive report saved to {output_html}[/green]")
 
 
-def _run_analysis(path: Path, experiment: ExperimentType, channel: str, plot: bool):
+def _run_analysis(
+    path: Path, experiment: ExperimentType, channel: str, plot: bool
+) -> Optional[AnalysisContext]:
     loader = KeysightLoader(channel=channel)
 
     if experiment == ExperimentType.T2_STAR:
@@ -123,6 +143,7 @@ def _run_analysis(path: Path, experiment: ExperimentType, channel: str, plot: bo
             plot_result(
                 data.time, np.abs(data.signal), result, "Time (s)", "Signal (Magnitude)"
             )
+        return AnalysisContext(data=data, result=result)
 
     elif experiment == ExperimentType.T2_COMBINED:
         # T2 Combined: Single file (or multiple) with echo train
@@ -141,14 +162,14 @@ def _run_analysis(path: Path, experiment: ExperimentType, channel: str, plot: bo
 
         console.print("Extracting Echo Train...")
         # Paramaters for peak finding might need tuning or exposing
-        # Using defaults for now
-        peak_times, peak_amps = extract_echo_train(data)
+        # Using defaults for now, with min_height=0.5 to filter noise
+        peak_times, peak_amps = extract_echo_train(data, min_height=0.5)
 
         if len(peak_times) < 3:
             console.print(
                 "[red]Not enough peaks found for T2 fit (need at least 3, so >2).[/red]"
             )
-            return
+            return None
 
         # Skip the first 2 peaks (start from 3rd peak onward)
         peak_times = peak_times[2:]
@@ -176,6 +197,10 @@ def _run_analysis(path: Path, experiment: ExperimentType, channel: str, plot: bo
         if plot:
             # We want: Raw Data + Peaks + Fit Curve on ONE graph
             plot_combined_t2(data, peak_times, peak_amps, result)
+
+        return AnalysisContext(
+            data=data, result=result, peak_times=peak_times, peak_amps=peak_amps
+        )
 
     else:
         # T1 or T2 - Expecting directory of files
@@ -244,6 +269,13 @@ def _run_analysis(path: Path, experiment: ExperimentType, channel: str, plot: bo
                 delays, amplitudes, result, raw_traces, "Delay (s)", "Amplitude"
             )
 
+        # For T1/T2, constructing 'data' representing the XY for plot
+        # passing delays as time, amplitudes as signal
+        aggregated_data = NMRData(time=delays, signal=amplitudes)
+        return AnalysisContext(
+            data=aggregated_data, result=result, raw_traces=raw_traces
+        )
+
 
 def print_result(result: AnalysisResult):
     table = Table(title=f"Results: {result.dataset_name}")
@@ -257,7 +289,7 @@ def print_result(result: AnalysisResult):
     console.print(table)
 
 
-def plot_result(x, y, result: AnalysisResult, xlabel, ylabel):
+def plot_result(x, y, result: AnalysisResult, xlabel, ylabel, filepath: str = None):
     plt.figure(figsize=(8, 5))
     plt.scatter(x, y, label="Data", color="blue")
     plt.plot(x, result.fit_curve, label="Fit", color="red")
@@ -266,7 +298,11 @@ def plot_result(x, y, result: AnalysisResult, xlabel, ylabel):
     plt.title(f"{result.dataset_name} Fit")
     plt.legend()
     plt.grid(True)
-    plt.show()
+    if filepath:
+        plt.savefig(filepath)
+        plt.close()  # Close the plot to free up memory
+    else:
+        plt.show()
 
 
 def plot_combined_t2(

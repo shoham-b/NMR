@@ -4,33 +4,11 @@ import numpy as np
 from nmr_analysis.core.types import NMRData
 
 
-def extract_peak_amplitude(data: NMRData, method: str = "max_abs") -> float:
-    """
-    Extract the signal amplitude from an NMR trace.
-
-    Args:
-        data: NMRData object.
-        method: 'max', 'min', 'max_abs', 'integral'.
-
-    Returns:
-        Amplitude value.
-    """
-    signal = data.signal
-
-    if method == "max":
-        return np.max(signal)
-    elif method == "min":
-        return np.min(signal)
-    elif method == "max_abs":
-        return np.max(np.abs(signal))
-    elif method == "integral":
-        return np.trapz(np.abs(signal), data.time)
-    else:
-        raise ValueError(f"Unknown method: {method}")
-
-
 def extract_echo_train(
-    data: NMRData, min_distance: int = 100, threshold_rel: float = 0.1
+    data: NMRData,
+    min_distance: int = 100,
+    threshold_rel: float = 0.1,
+    min_height: float = 0.5,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Extract peaks from a CPMG echo train.
@@ -39,6 +17,7 @@ def extract_echo_train(
         data: NMRData object.
         min_distance: Minimum number of samples between peaks.
         threshold_rel: Relative threshold (0-1) of max peak to consider.
+        min_height: Absolute minimum height threshold.
 
     Returns:
         Tuple of (peak_times, peak_amplitudes)
@@ -47,7 +26,9 @@ def extract_echo_train(
 
     signal = np.abs(data.signal)
     max_sig = np.max(signal)
-    height = max_sig * threshold_rel
+
+    # Ensure height is at least min_height
+    height = max(min_height, max_sig * threshold_rel)
 
     # find_peaks returns indices
     peaks, _ = find_peaks(signal, height=height, distance=min_distance)
@@ -61,9 +42,9 @@ def extract_echo_train(
 def extract_peak_by_index(
     data: NMRData,
     peak_index: int = 2,
-    min_distance: int = 100,
+    min_distance: int = 10,
     threshold_rel: float = 0.1,
-    min_height: float = 1.0,
+    min_height: float = 0.6,
 ) -> Tuple[float, float, int]:
     """
     Extract a specific peak (by index) from the echo train.
