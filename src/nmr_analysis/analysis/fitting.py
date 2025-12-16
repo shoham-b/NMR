@@ -113,7 +113,7 @@ class Fitter:
 
             return AnalysisResult(
                 experiment_type=ExperimentType.T2_STAR,
-                dataset_name="FID Analysis",
+                dataset_name="T2* Analysis",
                 params={"M0": M0, "T2_star": T2_star, "offset": offset},
                 fit_curve=full_fit_curve,
                 residuals=residuals,
@@ -123,7 +123,7 @@ class Fitter:
         except RuntimeError:
             return AnalysisResult(
                 experiment_type=ExperimentType.T2_STAR,
-                dataset_name="FID Analysis (Fit Failed)",
+                dataset_name="T2* Analysis (Fit Failed)",
                 params={},
                 fit_curve=np.full_like(time, np.nan),
                 residuals=np.zeros_like(magnitude),

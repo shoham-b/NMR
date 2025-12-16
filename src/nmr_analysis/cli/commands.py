@@ -88,11 +88,11 @@ def analyze(
                         save_path = output_dir / name
                         save_path.mkdir(parents=True, exist_ok=True)
 
-                    ctx = _run_analysis(
+                    ctxs = _run_analysis(
                         dataset_path, exp_type, channel, plot, save_path=save_path
                     )
-                    if ctx:
-                        collected_contexts.append(ctx)
+                    if ctxs:
+                        collected_contexts.extend(ctxs)
                 except Exception as e:
                     console.print(f"[red]Failed to analyze {name}: {e}[/red]")
 
@@ -124,10 +124,10 @@ def analyze(
         save_path = output_dir
         save_path.mkdir(parents=True, exist_ok=True)
 
-    ctx = _run_analysis(path, experiment, channel, plot, save_path=save_path)
-    if interactive and ctx:
+    ctxs = _run_analysis(path, experiment, channel, plot, save_path=save_path)
+    if interactive and ctxs:
         output_html = (path if path.is_dir() else path.parent) / "index.html"
-        generate_dashboard([ctx], output_html)
+        generate_dashboard(ctxs, output_html)
         console.print(f"[green]Interactive report saved to {output_html}[/green]")
 
 
@@ -137,47 +137,55 @@ def _run_analysis(
     channel: str,
     plot: bool,
     save_path: Optional[Path] = None,
-) -> Optional[AnalysisContext]:
+) -> List[AnalysisContext]:
     loader = KeysightLoader(channel=channel)
+    results = []
 
     if experiment == ExperimentType.T2_STAR:
-        # Expecting single file (can be directory if new t~ structure implies series, but usually FID is one)
-        # Assuming single file for now or finding first file in dir
-        target_file = path
+        # T2*: Analyze each file independently
+        target_files = []
         if path.is_dir():
-            files = list(path.glob("*.h5")) + list(path.glob("*.hdf5"))
-            if not files:
+            target_files = list(path.glob("*.h5")) + list(path.glob("*.hdf5"))
+            if not target_files:
                 raise FileNotFoundError(f"No HDF5 files in {path}")
-            target_file = files[0]  # Pick first one or loop?
-            # If t~ directory has multiple, user might mean batch of t2*?
-            # Let's stick to single file behavior or loop if directory for robustness?
-            # Existing plan: T2* single file.
-            # If path is t~ directory, picking first file is safer for now.
-            if len(files) > 1:
-                console.print(
-                    f"[yellow]Warning: Multiple files in {path}, analyzing {target_file.name}[/yellow]"
-                )
+        else:
+            target_files = [path]
 
-        console.print(f"Loading {target_file}...")
-        data = loader.load(target_file)
-        console.print("Fitting T2* decay...")
-        result = Fitter.fit_t2_star(data)
-        print_result(result)
-        if plot:
-            filepath = None
-            if save_path:
-                filepath = save_path / f"{target_file.stem}_fit.png"
-                console.print(f"Saving plot to {filepath.as_uri()}")
+        console.print(f"Found {len(target_files)} T2* files to analyze.")
 
-            plot_result(
-                data.time,
-                np.abs(data.signal),
-                result,
-                f"Time ({data.metadata.get('time_unit', 's')})",
-                "Signal (Magnitude)",
-                filepath=filepath,
-            )
-        return AnalysisContext(data=data, result=result)
+        for target_file in target_files:
+            try:
+                console.print(f"Loading {target_file.name}...")
+                data = loader.load(target_file)
+                console.print(f"Fitting T2* for {target_file.name}...")
+                result = Fitter.fit_t2_star(data)
+                # Ensure unique dataset name if multiple
+                if len(target_files) > 1:
+                    result.dataset_name = f"{result.dataset_name} ({target_file.stem})"
+
+                print_result(result)
+                if plot:
+                    filepath = None
+                    if save_path:
+                        # If save_path is a directory (via batch or single with dir input), use it
+                        # If single file input, save_path might be parent dir
+                        out_dir = save_path if save_path.is_dir() else save_path.parent
+                        filepath = out_dir / f"{target_file.stem}_fit.png"
+                        console.print(f"Saving plot to {filepath.as_uri()}")
+
+                    plot_result(
+                        data.time,
+                        np.abs(data.signal),
+                        result,
+                        f"Time ({data.metadata.get('time_unit', 's')})",
+                        "Signal (Magnitude)",
+                        filepath=filepath,
+                    )
+                results.append(AnalysisContext(data=data, result=result))
+            except Exception as e:
+                console.print(f"[red]Failed to analyze {target_file.name}: {e}[/red]")
+
+        return results
 
     elif experiment == ExperimentType.T2_COMBINED:
         # T2 Combined: Single file (or multiple) with echo train
@@ -203,7 +211,10 @@ def _run_analysis(
             console.print(
                 "[red]Not enough peaks found for T2 fit (need at least 3, so >2).[/red]"
             )
-            return None
+            console.print(
+                "[red]Not enough peaks found for T2 fit (need at least 3, so >2).[/red]"
+            )
+            return []
 
         # Skip the first 2 peaks (start from 3rd peak onward)
         peak_times = peak_times[2:]
@@ -237,9 +248,11 @@ def _run_analysis(
 
             plot_combined_t2(data, peak_times, peak_amps, result, filepath=filepath)
 
-        return AnalysisContext(
-            data=data, result=result, peak_times=peak_times, peak_amps=peak_amps
-        )
+        return [
+            AnalysisContext(
+                data=data, result=result, peak_times=peak_times, peak_amps=peak_amps
+            )
+        ]
 
     else:
         # T1 or T2 - Expecting directory of files
@@ -267,7 +280,7 @@ def _run_analysis(
                     data = loader.load(f)
                     # Extract from 3rd peak (index 2) with smoothing
                     t, amp, idx = extract_peak_by_index(
-                        data, peak_index=2, smoothing=2.0
+                        data, peak_index=2, smoothing=3.0
                     )
 
                     delays.append(t)
@@ -329,9 +342,12 @@ def _run_analysis(
         # For T1/T2, constructing 'data' representing the XY for plot
         # passing delays as time, amplitudes as signal
         aggregated_data = NMRData(time=delays, signal=amplitudes)
-        return AnalysisContext(
-            data=aggregated_data, result=result, raw_traces=raw_traces
-        )
+        # For T1/T2, constructing 'data' representing the XY for plot
+        # passing delays as time, amplitudes as signal
+        aggregated_data = NMRData(time=delays, signal=amplitudes)
+        return [
+            AnalysisContext(data=aggregated_data, result=result, raw_traces=raw_traces)
+        ]
 
 
 def print_result(result: AnalysisResult):
@@ -349,17 +365,29 @@ def print_result(result: AnalysisResult):
 def plot_result(
     x, y, result: AnalysisResult, xlabel, ylabel, filepath: Optional[Path] = None
 ):
-    plt.figure(figsize=(8, 5))
-    plt.scatter(x, y, label="Data", color="blue")
-    plt.plot(x, result.fit_curve, label="Fit", color="red")
+    # T2* specific: only shows the log graph as requested
+    plt.figure(figsize=(8, 6))
+
+    # Filter for y > 1 (log friendly)
+    mask = y > 1
+
+    plt.plot(x[mask], y[mask], label="Data", color="blue")
+
+    if result.fit_curve is not None:
+        fit_mask = result.fit_curve > 1
+        plt.plot(x[fit_mask], result.fit_curve[fit_mask], label="Fit", color="red")
+
     plt.xlabel(xlabel)
-    plt.ylabel(ylabel)
-    plt.title(f"{result.dataset_name} Fit")
+    plt.ylabel(f"{ylabel} (Log)")
+    plt.title(f"{result.dataset_name} (Log Scale)")
+    plt.yscale("log")
+    plt.ylim(bottom=1)
     plt.legend()
-    plt.grid(True)
+    plt.grid(True, which="both", alpha=0.5)
+
     if filepath:
         plt.savefig(filepath)
-        plt.close()  # Close the plot to free up memory
+        plt.close()
     else:
         plt.show()
 
@@ -372,13 +400,14 @@ def plot_combined_t2(
     filepath: Optional[Path] = None,
 ):
     """
-    Plot Raw Data, Peaks, and Fit Curve on a single graph.
-    Matches style of plot_analysis_summary.
+    Plot Raw Data, Peaks, and Fit Curve on a split graph (Linear | Log).
     """
-    plt.figure(figsize=(12, 8))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    unit = data.metadata.get("time_unit", "s")
 
-    # 1. Raw Data (Background)
-    plt.plot(
+    # --- Plot 1: Full Data (Linear) ---
+    # Raw Echo Train
+    ax1.plot(
         data.time,
         np.abs(data.signal),
         label="Raw Echo Train",
@@ -386,82 +415,85 @@ def plot_combined_t2(
         alpha=0.6,
     )
 
-    # 2. Peaks (Scatter with Gradient)
-    # Use rank/index for color mapping
+    # Peaks (Scatter)
     num_peaks = len(peak_times)
     cmap = cm.viridis
     norm = plt.Normalize(0, num_peaks - 1 if num_peaks > 1 else 1)
-
-    # Create colors for each peak
     colors = [cmap(norm(i)) for i in range(num_peaks)]
 
-    plt.scatter(
+    ax1.scatter(
         peak_times,
         peak_amps,
         c=colors,
         marker="x",
-        s=100,
+        s=80,
         linewidths=2,
         zorder=5,
-        label="_nolegend_",  # Legend handled via dummy or assume 'Raw Echo Train' covers it?
-        # Better to add dummy for "Extracted Peaks" styling
+        label="_nolegend_",
     )
 
-    # Dummy marker for legend
-    plt.scatter([], [], color="black", marker="x", label="Extracted Peaks")
-
-    # 3. Fit Curve
-    unit = data.metadata.get("time_unit", "s")
-
+    # Fit Curve (Linear)
     if "M0" in result.params and "T2" in result.params:
         M0 = result.params["M0"]
         T2 = result.params["T2"]
         offset = result.params.get("offset", 0.0)
-
         full_fit_curve = t2_decay_model(data.time, M0, T2, offset)
+        label_fit = f"T2 Fit (T2={T2:.4e} {unit})"
 
-        # Convert T2 to appropriate unit for label if needed, or keeping it simple
-        plt.plot(
+        ax1.plot(
             data.time,
             full_fit_curve,
-            label=f"T2 Fit (T2={T2} {unit})",
-            # User request: "when displaying t1 t2 units, use these units"
+            label=label_fit,
             color="red",
             linestyle="-",
             zorder=6,
         )
     else:
-        # Fallback
-        plt.plot(peak_times, result.fit_curve, label="Fit", color="red", zorder=6)
+        ax1.plot(peak_times, result.fit_curve, label="Fit", color="red", zorder=6)
 
-    plt.xlabel(f"Time ({unit})")
-    plt.ylabel("Signal Magnitude")
-    plt.title("T2 Combined Analysis: Raw Data, Peaks, and Fit")
-    plt.legend(loc="best")
-    plt.grid(True, alpha=0.5)
+    ax1.set_xlabel(f"Time ({unit})")
+    ax1.set_ylabel("Signal Magnitude")
+    ax1.set_title(f"{result.dataset_name} (Linear)")
+    ax1.grid(True, alpha=0.5)
+    ax1.legend(loc="best")
 
-    plt.ylim(auto=True)
+    # --- Plot 2: Decay (Log) ---
+    # Only Peaks and Fit
+    ax2.scatter(
+        peak_times,
+        peak_amps,
+        c=colors,
+        marker="x",
+        s=80,
+        linewidths=2,
+        zorder=5,
+        label="Peaks",
+    )
 
-    # Add colorbar for delay context
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-    sm.set_array([])
-    ax = plt.gca()
-    cbar = plt.colorbar(sm, ax=ax, label="Peak Sequence (Delay)")
+    # Fit Curve (Log) - Plot against peak times for cleaner look on log
+    if result.fit_curve is not None:
+        ax2.plot(
+            peak_times,
+            result.fit_curve,
+            label="Fit",
+            color="red",
+            linestyle="--",
+            zorder=6,
+        )
 
-    # Custom ticks for colorbar (Delay values)
-    if num_peaks > 1:
-        tick_indices = np.linspace(0, num_peaks - 1, num=min(6, num_peaks), dtype=int)
-        tick_indices = np.unique(tick_indices)
-        tick_labels = [f"{peak_times[i]:.2e}" for i in tick_indices]
-        cbar.set_ticks(tick_indices)
-        cbar.set_ticklabels(tick_labels)
+    ax2.set_xlabel(f"Time ({unit})")
+    ax2.set_ylabel("Signal Magnitude (Log)")
+    ax2.set_title("Decay (Log)")
+    ax2.set_yscale("log")
+    ax2.set_ylim(bottom=1)
+    ax2.grid(True, which="both", alpha=0.5)
+    ax2.legend(loc="best")
 
     plt.tight_layout()
     if filepath:
         plt.savefig(filepath)
         plt.close()
     else:
-        # Only show if not saving
         plt.show()
 
 
@@ -475,76 +507,53 @@ def plot_analysis_summary(
     filepath: Optional[Path] = None,
 ):
     """
-    Plot Fit Result and Raw Traces in a single figure.
+    Plot Fit Result and Raw Traces in a split figure (Linear | Log).
     """
-    plt.figure(figsize=(12, 8))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
 
-    # 1. Plot all Raw Traces (faint)
+    # Color Mapping
     cmap = cm.viridis
-    # Use RANK (index) for color mapping
     num_traces = len(raw_traces)
     norm = plt.Normalize(0, num_traces - 1 if num_traces > 1 else 1)
 
-    # Iterate raw_traces (which were sorted by time)
+    # --- Plot 1: Full Data (Linear) ---
+    # Raw Traces (faint)
     for i, (data, t, amp) in enumerate(raw_traces):
         color = cmap(norm(i))
-        plt.plot(data.time, np.abs(data.signal), color=color, alpha=0.5)
+        ax1.plot(data.time, np.abs(data.signal), color=color, alpha=0.3)
+        # Highlight points
+        ax1.scatter([t], [amp], color=color, marker="x", s=50, zorder=5)
 
-        # 2. Highlight specific peak used (Scatter)
-        plt.scatter(
-            [t],
-            [amp],
-            color=color,
-            marker="x",
-            s=100,
-            linewidths=2,
-            zorder=5,
-            label="_nolegend_",
-        )
-
-    # 3. Plot the Fit Curve
-    # Reconstruct smooth curve or just plot the fit points?
-    # Ideally we plot the fit curve over the delay times.
+    # Fit Curve (Linear)
+    # Reconstruct or just plot fit points? Fit result typically fits to delays (x)
     sorted_pairs = sorted(zip(x, result.fit_curve))
     sx, sy = zip(*sorted_pairs)
-    plt.plot(
-        sx,
-        sy,
-        label="T2 Fit",
-        color="red",
-        linestyle="-",
-        zorder=6,
-    )
+    ax1.plot(sx, sy, label="Fit", color="red", linestyle="-", zorder=6)
 
-    # Add dummy marker for legend to explain the 'x'
-    plt.scatter([], [], color="black", marker="x", label="Peaks (Data)")
+    ax1.set_xlabel(xlabel)
+    ax1.set_ylabel(ylabel)
+    ax1.set_title(f"{result.dataset_name} (Linear)")
+    ax1.grid(True, alpha=0.5)
+    ax1.legend(loc="best")
 
-    plt.xlabel(xlabel)
-    plt.ylabel(ylabel)
-    plt.title(f"{result.dataset_name} - Single Plot Analysis")
-    plt.legend(loc="best")
-    plt.grid(True, alpha=0.5)
+    # --- Plot 2: Decay (Log) ---
+    # Points + Fit
+    # Use same colors for points? Or just one color since no raw traces context?
+    # Let's use the color map so it matches
+    for i, (data, t, amp) in enumerate(raw_traces):
+        color = cmap(norm(i))
+        ax2.scatter([t], [amp], color=color, marker="x", s=80, zorder=5)
 
-    plt.ylim(auto=True)
+    # Fit Curve (Log)
+    ax2.plot(sx, sy, label="Fit", color="red", linestyle="--", zorder=6)
 
-    # Add colorbar for delay context
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-    sm.set_array([])
-
-    ax = plt.gca()
-    cbar = plt.colorbar(sm, ax=ax, label="Peak Delay (s)")
-
-    # Set ticks to show actual values based on index
-    if num_traces > 1:
-        # Select indices for ticks
-        tick_indices = np.linspace(0, num_traces - 1, num=min(6, num_traces), dtype=int)
-        tick_indices = np.unique(tick_indices)
-
-        # Labels are the delays at those indices
-        tick_labels = [f"{raw_traces[i][1]:.2e}" for i in tick_indices]
-
-        cbar.set_ticks(tick_indices)
-        cbar.set_ticklabels(tick_labels)
+    ax2.set_xlabel(xlabel)
+    ax2.set_ylabel(f"{ylabel} (Log)")
+    ax2.set_title("Decay (Log)")
+    ax2.set_yscale("log")
+    ax2.set_ylim(bottom=1)
+    ax2.grid(True, which="both", alpha=0.5)
+    ax2.legend(loc="best")
 
     plt.tight_layout()
     if filepath:
@@ -555,12 +564,13 @@ def plot_analysis_summary(
 
 
 if __name__ == "__main__":
-    analyze(
-        Path(r"H:\My Drive\Lab C\NMR"),
-        experiment=None,
-        channel="Channel 2",
-        plot=True,
-        save_plots=True,
-        output_dir=Path(__file__).parents[3] / "output",
-        interactive=True,
-    )
+    for week in ("2.1", "2.2"):
+        analyze(
+            Path(rf"H:\My Drive\Lab C\NMR\week{week}"),
+            experiment=None,
+            channel="Channel 1",
+            plot=True,
+            save_plots=True,
+            output_dir=Path(__file__).parents[3] / "output" / week,
+            interactive=True,
+        )
