@@ -21,6 +21,7 @@ dependencies = [
     "pyqtgraph>=0.14.0",
     "rich>=14.2.0",
     "scipy>=1.16.3",
+    "scipy-stubs~=1.16.3",
     "typer>=0.20.0",
     "uvicorn>=0.38.0",
 ]
