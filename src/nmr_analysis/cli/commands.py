@@ -173,7 +173,7 @@ def _run_analysis(
                 data.time,
                 np.abs(data.signal),
                 result,
-                "Time (s)",
+                f"Time ({data.metadata.get('time_unit', 's')})",
                 "Signal (Magnitude)",
                 filepath=filepath,
             )
@@ -197,7 +197,7 @@ def _run_analysis(
         console.print("Extracting Echo Train...")
         # Paramaters for peak finding might need tuning or exposing
         # Using defaults for now, with min_height=0.5 to filter noise
-        peak_times, peak_amps = extract_echo_train(data, min_height=0.5)
+        peak_times, peak_amps = extract_echo_train(data)
 
         if len(peak_times) < 3:
             console.print(
@@ -318,7 +318,10 @@ def _run_analysis(
                 amplitudes,
                 result,
                 raw_traces,
-                "Delay (s)",
+                # Use unit from first trace if available
+                f"Delay ({raw_traces[0][0].metadata.get('time_unit', 's')})"
+                if raw_traces
+                else "Delay (s)",
                 "Amplitude",
                 filepath=filepath,
             )
@@ -408,6 +411,8 @@ def plot_combined_t2(
     plt.scatter([], [], color="black", marker="x", label="Extracted Peaks")
 
     # 3. Fit Curve
+    unit = data.metadata.get("time_unit", "s")
+
     if "M0" in result.params and "T2" in result.params:
         M0 = result.params["M0"]
         T2 = result.params["T2"]
@@ -415,10 +420,12 @@ def plot_combined_t2(
 
         full_fit_curve = t2_decay_model(data.time, M0, T2, offset)
 
+        # Convert T2 to appropriate unit for label if needed, or keeping it simple
         plt.plot(
             data.time,
             full_fit_curve,
-            label=f"T2 Fit (T2={T2 * 1e6:.2f} \u03bcs)",
+            label=f"T2 Fit (T2={T2} {unit})",
+            # User request: "when displaying t1 t2 units, use these units"
             color="red",
             linestyle="-",
             zorder=6,
@@ -427,7 +434,7 @@ def plot_combined_t2(
         # Fallback
         plt.plot(peak_times, result.fit_curve, label="Fit", color="red", zorder=6)
 
-    plt.xlabel("Time (s)")
+    plt.xlabel(f"Time ({unit})")
     plt.ylabel("Signal Magnitude")
     plt.title("T2 Combined Analysis: Raw Data, Peaks, and Fit")
     plt.legend(loc="best")

@@ -70,6 +70,27 @@ class KeysightLoader:
                 attrs.update(dict(group.attrs))
 
                 # Metadata extraction
+                # Try to extract time unit from specific Bruker/Keysight path
+                unit_path = "/__BV_Dataset__Data__/xdata_chan/BVAxisUnitLabel"
+                try:
+                    if unit_path in f:
+                        unit_data = f[unit_path][()]
+                        # Handle numpy array or scalar
+                        if hasattr(unit_data, "flatten"):
+                            unit_data = unit_data.flatten()
+                            if len(unit_data) > 0:
+                                unit_data = unit_data[0]
+
+                        # Handle bytes to string decoding
+                        if isinstance(unit_data, (bytes, np.bytes_)):
+                            unit_data = unit_data.decode("utf-8")
+
+                        attrs["time_unit"] = str(unit_data)
+                except Exception:
+                    # Ignore errors in unit extraction
+                    pass
+
+                # Metadata extraction
                 x_inc = attrs.get("XIncrement", 1.0)
                 x_org = attrs.get("XOrigin", 0.0)
 

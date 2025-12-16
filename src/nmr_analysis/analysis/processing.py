@@ -1,14 +1,18 @@
 from typing import Tuple
+
 import numpy as np
+from scipy.signal import find_peaks
+from scipy.ndimage import gaussian_filter1d
 
 from nmr_analysis.core.types import NMRData
 
 
 def extract_echo_train(
     data: NMRData,
-    min_distance: int = 100,
+    min_distance: int = 10,
     threshold_rel: float = 0.1,
-    min_height: float = 0.3,
+    min_height: float = 0.5,
+    smoothing: float = 2.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Extract peaks from a CPMG echo train.
@@ -18,23 +22,26 @@ def extract_echo_train(
         min_distance: Minimum number of samples between peaks.
         threshold_rel: Relative threshold (0-1) of max peak to consider.
         min_height: Absolute minimum height threshold.
+        smoothing: Sigma for Gaussian smoothing (0 to disable).
 
     Returns:
         Tuple of (peak_times, peak_amplitudes)
     """
-    from scipy.signal import find_peaks
-
     signal = np.abs(data.signal)
-    max_sig = np.max(signal)
 
-    # Ensure height is at least min_height
+    # Use smoothed signal for detection
+    detection_signal = signal
+    if smoothing > 0:
+        detection_signal = gaussian_filter1d(signal, sigma=smoothing)
+
+    max_sig = np.max(detection_signal)
     height = max(min_height, max_sig * threshold_rel)
 
     # find_peaks returns indices
-    peaks, _ = find_peaks(signal, height=height, distance=min_distance, prominence=0.6)
+    peaks, _ = find_peaks(detection_signal, distance=min_distance, height=height)
 
     peak_times = data.time[peaks]
-    peak_amps = signal[peaks]
+    peak_amps = signal[peaks]  # Return original amplitudes
 
     return peak_times, peak_amps
 
@@ -42,9 +49,6 @@ def extract_echo_train(
 def extract_peak_by_index(
     data: NMRData,
     peak_index: int = 3,
-    min_distance: int = 10,
-    threshold_rel: float = 0.1,
-    min_height: float = 0.6,
     smoothing: float = 0.0,
 ) -> Tuple[float, float, int]:
     """
@@ -53,35 +57,28 @@ def extract_peak_by_index(
     Args:
         data: NMRData object.
         peak_index: Index of the peak to extract (0-based). Default 2 for 3rd peak.
-        min_distance: Minimum distance between peaks.
-        threshold_rel: Relative height threshold.
-        min_height: Absolute minimum height threshold.
         smoothing: Sigma for Gaussian smoothing (0 to disable).
 
     Returns:
         Tuple of (time, amplitude, raw_data_index)
     """
-    from scipy.signal import find_peaks
-    from scipy.ndimage import gaussian_filter1d
-
     signal = np.abs(data.signal)
 
+    detection_signal = signal
     if smoothing > 0:
-        signal = gaussian_filter1d(signal, sigma=smoothing)
+        detection_signal = gaussian_filter1d(signal, sigma=smoothing)
 
-    max_sig = np.max(signal)
-
-    # Ensure height is at least min_height
-    height = max(min_height, max_sig * threshold_rel)
-
-    peaks, _ = find_peaks(signal, height=height, distance=min_distance, prominence=0.6)
+    peaks, _ = find_peaks(detection_signal)
 
     if len(peaks) <= peak_index:
+        # Fallback: if smoothing caused fewer peaks, try without?
+        # Or simply error. The user implies smoothing is better.
         raise ValueError(
             f"Not enough peaks found. Found {len(peaks)}, required index {peak_index}"
         )
 
     idx = peaks[peak_index]
+    # Return time, ORIGINAL signal amplitude, and index
     return data.time[idx], signal[idx], idx
 
 
@@ -91,6 +88,7 @@ def extract_second_highest_peak(
     threshold_rel: float = 0.1,
     min_height: float = 0.6,
     min_time_sep: float = 0.1,  # Minimum separation from highest peak in seconds
+    smoothing: float = 2.0,
 ) -> Tuple[float, float, int]:
     """
     Extract the peak with the second highest amplitude that is at least
@@ -102,20 +100,24 @@ def extract_second_highest_peak(
         threshold_rel: Relative height threshold.
         min_height: Absolute minimum height threshold.
         min_time_sep: Minimum time separation from the highest peak (seconds).
+        smoothing: Sigma for Gaussian smoothing.
 
     Returns:
         Tuple of (time, amplitude, raw_data_index)
     """
-    from scipy.signal import find_peaks
-
     signal = np.abs(data.signal)
-    max_sig = np.max(signal)
+
+    detection_signal = signal
+    if smoothing > 0:
+        detection_signal = gaussian_filter1d(signal, sigma=smoothing)
+
+    max_sig = np.max(detection_signal)
 
     # Ensure height is at least min_height
     height = max(min_height, max_sig * threshold_rel)
 
     peaks, properties = find_peaks(
-        signal, height=height, distance=min_distance, prominence=0.6
+        detection_signal, height=height, distance=min_distance, prominence=0.6
     )
 
     if len(peaks) < 2:
@@ -123,16 +125,20 @@ def extract_second_highest_peak(
             f"Not enough peaks found. Found {len(peaks)}, required at least 2"
         )
 
-    # Get amplitudes and times of peaks
-    peak_amps = signal[peaks]
+    # Get amplitudes and times of peaks (using smoothed signal for sorting logic?
+    # Or original? "continue to using the orignal data for the rest of the processsing.
+    # Usually "highest peak" determination should probably be on smoothed data to be robust against noise spikes,
+    # but the value returned should be original.
+    # I will use detection_signal for finding "highest" to be consistent with "finding logic".
+    peak_amps_for_sorting = detection_signal[peaks]
     peak_times = data.time[peaks]
 
     # Find the highest peak
-    highest_idx_in_peaks = np.argmax(peak_amps)
+    highest_idx_in_peaks = np.argmax(peak_amps_for_sorting)
     highest_time = peak_times[highest_idx_in_peaks]
 
     # Sort indices by amplitude (descending)
-    sorted_indices = np.argsort(peak_amps)[::-1]
+    sorted_indices = np.argsort(peak_amps_for_sorting)[::-1]
 
     # Iterate through candidates (skipping the first one which is the highest itself)
     for idx_in_peaks in sorted_indices[1:]:
@@ -142,6 +148,7 @@ def extract_second_highest_peak(
         if dist >= min_time_sep:
             # Found our winner
             final_peak_idx = peaks[idx_in_peaks]
+            # Return ORIGINAL signal value
             return data.time[final_peak_idx], signal[final_peak_idx], final_peak_idx
 
     # If we loop through everything and find nothing suitable
