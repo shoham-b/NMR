@@ -69,20 +69,19 @@ class Fitter:
         Fit T2* from a single FID trace.
         Starts fitting from the first peak > 5.0 if available.
         """
-        from scipy.signal import find_peaks
 
         time = data.time
         signal = data.signal
         magnitude = np.abs(signal)
 
-        # Find start index: first peak > 5.0
-        # If no peak > 5.0 found, use max as fallback
-        peaks, _ = find_peaks(magnitude, height=5.0)
+        # Find start index: just use the highest value (magnitude max)
+        # and start fitting from the next point
+        max_idx = np.argmax(magnitude)
+        start_idx = max_idx + 1
 
-        if len(peaks) > 0:
-            start_idx = peaks[0]
-        else:
-            start_idx = np.argmax(magnitude)
+        # Ensure start_idx is within bounds
+        if start_idx >= len(magnitude):
+            start_idx = max(0, len(magnitude) - 1)
 
         # Slice data for fitting
         t_fit = time[start_idx:]
@@ -128,4 +127,9 @@ class Fitter:
                 fit_curve=np.full_like(time, np.nan),
                 residuals=np.zeros_like(magnitude),
                 r_squared=0.0,
+                metadata={
+                    "source": "magnitude_fit",
+                    "start_index": start_idx,
+                    "error": "Fit Failed",
+                },
             )

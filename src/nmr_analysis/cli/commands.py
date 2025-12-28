@@ -205,7 +205,8 @@ def _run_analysis(
         console.print("Extracting Echo Train...")
         # Paramaters for peak finding might need tuning or exposing
         # Using defaults for now, with min_height=0.5 to filter noise
-        peak_times, peak_amps = extract_echo_train(data)
+        # User requested smoothing for peak finding
+        peak_times, peak_amps = extract_echo_train(data, smoothing=3.0)
 
         if len(peak_times) < 3:
             console.print(
@@ -278,9 +279,14 @@ def _run_analysis(
             for f in files:
                 try:
                     data = loader.load(f)
-                    # Extract from 3rd peak (index 2) with smoothing
+                    # Determine peak index based on experiment type
+                    # T1: use 2nd peak (index 1)
+                    # T2: use 3rd peak (index 2)
+                    peak_idx_to_use = 1 if experiment == ExperimentType.T1 else 2
+
+                    # Extract peak with smoothing
                     t, amp, idx = extract_peak_by_index(
-                        data, peak_index=2, smoothing=3.0
+                        data, peak_index=peak_idx_to_use, smoothing=3.0
                     )
 
                     delays.append(t)
@@ -368,14 +374,25 @@ def plot_result(
     # T2* specific: only shows the log graph as requested
     plt.figure(figsize=(8, 6))
 
-    # Filter for y > 1 (log friendly)
-    mask = y > 1
+    # Filter start index if available (e.g. for T2*)
+    start_index = 0
+    if result.metadata and "start_index" in result.metadata:
+        start_index = result.metadata["start_index"]
 
-    plt.plot(x[mask], y[mask], label="Data", color="blue")
+    x_plot = x[start_index:]
+    y_plot = y[start_index:]
+
+    # Filter for y > 1 (log friendly)
+    mask = y_plot > 1
+
+    plt.plot(x_plot[mask], y_plot[mask], label="Data", color="blue")
 
     if result.fit_curve is not None:
-        fit_mask = result.fit_curve > 1
-        plt.plot(x[fit_mask], result.fit_curve[fit_mask], label="Fit", color="red")
+        fit_curve_plot = result.fit_curve[start_index:]
+        # fit_curve might be fully NaN if fit failed, or partially NaN before start_idx
+        # We sliced it so it should be fine, but check for > 1 and finite
+        fit_mask = (fit_curve_plot > 1) & np.isfinite(fit_curve_plot)
+        plt.plot(x_plot[fit_mask], fit_curve_plot[fit_mask], label="Fit", color="red")
 
     plt.xlabel(xlabel)
     plt.ylabel(f"{ylabel} (Log)")
