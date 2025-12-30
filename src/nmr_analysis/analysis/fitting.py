@@ -64,30 +64,72 @@ class Fitter:
             return {}, np.zeros_like(delays), np.zeros_like(delays), 0.0
 
     @staticmethod
-    def fit_t2_star(data: NMRData) -> AnalysisResult:
+    def fit_t2_star(
+        data: NMRData, smoothing: float = 1.0, trim_percent: float = 0.1
+    ) -> AnalysisResult:
         """
         Fit T2* from a single FID trace.
-        Starts fitting from the first peak > 5.0 if available.
+        Trims the first and last `trim_percent` of data.
+        Applies Gaussian smoothing to the magnitude.
+        Starts fitting from the first peak > 5.0 (on smoothed data).
         """
+        from scipy.ndimage import gaussian_filter1d
 
         time = data.time
         signal = data.signal
-        magnitude = np.abs(signal)
+        raw_magnitude = np.abs(signal)
 
-        # Find start index: just use the highest value (magnitude max)
-        # and start fitting from the next point
-        max_idx = np.argmax(magnitude)
-        start_idx = max_idx + 1
+        # Apply smoothing first
+        if smoothing > 0:
+            detection_signal = gaussian_filter1d(raw_magnitude, sigma=smoothing)
+        else:
+            detection_signal = raw_magnitude
 
-        # Ensure start_idx is within bounds
-        if start_idx >= len(magnitude):
-            start_idx = max(0, len(magnitude) - 1)
+        # Find Peak Index (Max of Smoothed Magnitude)
+        peak_idx = np.argmax(detection_signal)
 
-        # Slice data for fitting
-        t_fit = time[start_idx:]
-        mag_fit = magnitude[start_idx:]
+        # Trimming Logic:
+        # Start: Peak Index + 20% of the "tail" (data after peak)
+        # End: Total Length - 10% of Total Length
 
-        M0_guess = np.max(mag_fit)
+        n_samples = len(raw_magnitude)
+        tail_length = n_samples - peak_idx
+
+        # 20% of tail
+        # Using hardcoded values as per instruction, ignoring `trim_percent` for this logic.
+        start_trim_factor = 0.2
+        end_trim_factor = 0.1
+
+        global_start_fit_idx = peak_idx + int(tail_length * start_trim_factor)
+        global_end_fit_idx = n_samples - int(n_samples * end_trim_factor)
+
+        # Ensure valid range
+        if global_start_fit_idx >= global_end_fit_idx:
+            # Fallback: use the peak as start, and no end trim
+            global_start_fit_idx = peak_idx
+            global_end_fit_idx = n_samples
+
+        # Ensure indices are within bounds
+        global_start_fit_idx = max(0, global_start_fit_idx)
+        global_end_fit_idx = min(n_samples, global_end_fit_idx)
+
+        # Re-check after bounds adjustment
+        if global_start_fit_idx >= global_end_fit_idx:
+            # If still invalid, try to get at least one point
+            if n_samples > 0:
+                global_start_fit_idx = peak_idx
+                global_end_fit_idx = peak_idx + 1
+            else:
+                global_start_fit_idx = 0
+                global_end_fit_idx = 0
+
+        # Slice for fitting
+        # Use smoothed data for fitting? User: "also use smoothing for the data"
+        t_fit = time[global_start_fit_idx:global_end_fit_idx]
+        mag_fit = detection_signal[global_start_fit_idx:global_end_fit_idx]
+
+        # Initial guess
+        M0_guess = np.max(mag_fit) if len(mag_fit) > 0 else 1.0
         T2_guess = (t_fit[-1] - t_fit[0]) / 3.0 if len(t_fit) > 1 else 1e-3
         p0 = [M0_guess, T2_guess, 0.0]
 
@@ -95,19 +137,24 @@ class Fitter:
             popt, pcov = curve_fit(t2_decay_model, t_fit, mag_fit, p0=p0)
             M0, T2_star, offset = popt
 
-            # Calculate full fit curve (padded with NaN before start_idx)
+            # Calculate full fit curve (padded with NaN)
             full_fit_curve = np.full_like(time, np.nan)
-            full_fit_curve[start_idx:] = t2_decay_model(t_fit, *popt)
 
-            # Residuals only for the fitted portion (padding rest with 0 or NaN?)
-            # AnalysisResult expects residuals matching data shape mostly.
-            # Let's use 0 for non-fitted part residuals? Or NaN?
-            # Existing code used 'magnitude - fit_curve'. If fit_curve has NaNs, residuals will be NaN.
-            # That's fine for Plotly.
-            residuals = magnitude - full_fit_curve
+            # Project onto fitted region
+            full_fit_curve[global_start_fit_idx:global_end_fit_idx] = t2_decay_model(
+                t_fit, *popt
+            )
 
-            ss_res = np.nansum(residuals**2)
-            ss_tot = np.nansum((magnitude - np.nanmean(magnitude)) ** 2)
+            # Residuals
+            full_residuals = np.full_like(time, np.nan)
+            full_residuals[global_start_fit_idx:global_end_fit_idx] = (
+                mag_fit - t2_decay_model(t_fit, *popt)
+            )
+
+            ss_res = np.sum(
+                full_residuals[global_start_fit_idx:global_end_fit_idx] ** 2
+            )
+            ss_tot = np.sum((mag_fit - np.mean(mag_fit)) ** 2)
             r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0.0
 
             return AnalysisResult(
@@ -115,9 +162,15 @@ class Fitter:
                 dataset_name="T2* Analysis",
                 params={"M0": M0, "T2_star": T2_star, "offset": offset},
                 fit_curve=full_fit_curve,
-                residuals=residuals,
+                residuals=full_residuals,
                 r_squared=r2,
-                metadata={"source": "magnitude_fit", "start_index": start_idx},
+                metadata={
+                    "source": "smoothed_fit_v2",
+                    "start_index": global_start_fit_idx,
+                    "end_index": global_end_fit_idx,
+                    "smoothing": smoothing,
+                    "peak_index": peak_idx,
+                },
             )
         except RuntimeError:
             return AnalysisResult(
@@ -125,11 +178,10 @@ class Fitter:
                 dataset_name="T2* Analysis (Fit Failed)",
                 params={},
                 fit_curve=np.full_like(time, np.nan),
-                residuals=np.zeros_like(magnitude),
+                residuals=np.zeros_like(raw_magnitude),
                 r_squared=0.0,
                 metadata={
-                    "source": "magnitude_fit",
-                    "start_index": start_idx,
+                    "source": "smoothed_fit",
                     "error": "Fit Failed",
                 },
             )

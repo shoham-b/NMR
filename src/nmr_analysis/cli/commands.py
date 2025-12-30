@@ -8,6 +8,7 @@ import typer
 from rich.console import Console
 from rich.progress import Progress
 from rich.table import Table
+from scipy.ndimage import gaussian_filter1d
 
 from nmr_analysis.analysis.fitting import Fitter
 from nmr_analysis.analysis.models import t2_decay_model
@@ -18,6 +19,9 @@ from nmr_analysis.analysis.processing import (
 from nmr_analysis.core.types import ExperimentType, AnalysisResult, NMRData
 from nmr_analysis.io.loader import KeysightLoader
 from nmr_analysis.visualization.interactive import generate_dashboard, AnalysisContext
+from scipy.ndimage import gaussian_filter1d
+
+ANALYSIS_SMOOTHING = 1.6
 
 app = typer.Typer()
 console = Console()
@@ -99,7 +103,7 @@ def analyze(
         if found_any:
             console.print("[green]Batch analysis completed.[/green]")
             if interactive and collected_contexts:
-                output_html = path / "index.html"
+                output_html = output_dir / "index.html"
                 generate_dashboard(collected_contexts, output_html)
                 console.print(
                     f"[green]Interactive report saved to {output_html}[/green]"
@@ -111,6 +115,7 @@ def analyze(
         console.print(
             "[yellow]No experiment type specified and no standard subdirectories (t1, t2, t~, t2combined) found.[/yellow]"
         )
+
         console.print("Please specify --type or ensure directory structure.")
         raise typer.Exit(1)
 
@@ -126,7 +131,7 @@ def analyze(
 
     ctxs = _run_analysis(path, experiment, channel, plot, save_path=save_path)
     if interactive and ctxs:
-        output_html = (path if path.is_dir() else path.parent) / "index.html"
+        output_html = output_dir / "index.html"
         generate_dashboard(ctxs, output_html)
         console.print(f"[green]Interactive report saved to {output_html}[/green]")
 
@@ -205,8 +210,12 @@ def _run_analysis(
         console.print("Extracting Echo Train...")
         # Paramaters for peak finding might need tuning or exposing
         # Using defaults for now, with min_height=0.5 to filter noise
+        # Paramaters for peak finding might need tuning or exposing
+        # Using defaults for now, with min_height=0.5 to filter noise
+        # Paramaters for peak finding might need tuning or exposing
+        # Using defaults for now, with min_height=0.5 to filter noise
         # User requested smoothing for peak finding
-        peak_times, peak_amps = extract_echo_train(data, smoothing=3.0)
+        peak_times, peak_amps = extract_echo_train(data, smoothing=ANALYSIS_SMOOTHING)
 
         if len(peak_times) < 3:
             console.print(
@@ -233,7 +242,7 @@ def _run_analysis(
 
         result = AnalysisResult(
             experiment_type=experiment,
-            dataset_name="T2 Combined (Echo Train)",
+            dataset_name="Spin Echo (Echo Train)",
             params=params,
             fit_curve=fit_curve,
             residuals=residuals,
@@ -280,22 +289,64 @@ def _run_analysis(
                 try:
                     data = loader.load(f)
                     # Determine peak index based on experiment type
-                    # T1: use 2nd peak (index 1)
-                    # T2: use 3rd peak (index 2)
-                    peak_idx_to_use = 1 if experiment == ExperimentType.T1 else 2
+                    # User request: "take the data starting from the first peak"
+                    peak_idx_to_use = 0
 
-                    # Extract peak with smoothing
-                    t, amp, idx = extract_peak_by_index(
-                        data, peak_index=peak_idx_to_use, smoothing=3.0
+                    # Extract peak with smoothing and robust constraints
+                    # T1/T2 usually need specific peak. If unsure, user might want to adjust index.
+                    t, amp, idx, all_peaks = extract_peak_by_index(
+                        data,
+                        peak_index=peak_idx_to_use,
+                        smoothing=ANALYSIS_SMOOTHING,
+                        min_distance=10,
+                        min_height=5,
+                        min_time_sep=0.1,
                     )
+
+                    # Slice data starting from the peak
+                    data.signal = data.signal[idx:]
+                    data.time = data.time[idx:]
+
+                    # Update peak index relative to new slice (it's now 0)
+                    all_peaks = [p - idx for p in all_peaks if p >= idx]
+
+                    # Delay is strictly the peak time (which is now the first point?)
+                    # Wait, if we slice time, t is still the absolute time of the peak
+                    tau = t
+
+                    # Extract sort key and label from filename
+                    # User request: order like "0_01" or "0_{number}", label to be that number
+                    # Default: use tau if no match
+                    import re
+
+                    match = re.search(r"(0_[\d\.]+)", f.stem)
+                    if match:
+                        # User request: "0_022 is actually a decimal 0.022"
+                        label = match.group(1).replace("_", ".")
+                        # Try to convert to float for sorting (0_01 -> 0.01)
+                        try:
+                            sort_val = float(label)
+                        except ValueError:
+                            sort_val = tau  # Fallback
+                    else:
+                        label = f.stem
+                        sort_val = tau
+
+                    # Store label in metadata for plotting
+                    data.metadata["trace_label"] = label
 
                     delays.append(t)
                     amplitudes.append(amp)
-                    raw_traces.append((data, t, amp))
+                    # Add sort_val to tuple for sorting
+                    raw_traces.append((data, t, amp, tau, all_peaks, sort_val))
                 except Exception as e:
                     console.print(f"[yellow]Skipping {f.name}: {e}[/yellow]")
 
                 progress.advance(task)
+
+        if not delays:
+            console.print("[red]No valid data processed.[/red]")
+            raise typer.Exit(1)
 
         delays = np.array(delays)
         amplitudes = np.array(amplitudes)
@@ -303,8 +354,9 @@ def _run_analysis(
         delays = delays[sorted_indices]
         amplitudes = amplitudes[sorted_indices]
 
-        # Sort raw traces
-        raw_traces.sort(key=lambda x: x[1])
+        # Sort raw traces by extracted sort_val (from filename number)
+        # raw_traces structure: (data, t, amp, tau, all_peaks, sort_val)
+        raw_traces.sort(key=lambda x: x[5])
 
         console.print("Fitting data...")
         if experiment == ExperimentType.T1:
@@ -325,24 +377,34 @@ def _run_analysis(
 
         print_result(result)
         if plot:
-            filepath = None
+            filepath_fit = None
+            filepath_traces = None
             if save_path:
                 # Name based on directory?
                 dirname = path.name
-                filepath = save_path / f"{dirname}_{experiment.value}_fit.png"
-                console.print(f"Saving plot to {filepath}")
+                filepath_fit = save_path / f"{dirname}_{experiment.value}_fit.png"
+                filepath_traces = save_path / f"{dirname}_{experiment.value}_traces.png"
+                console.print(f"Saving fit plot to {filepath_fit}")
+                console.print(f"Saving traces plot to {filepath_traces}")
 
+            # 1. Stacked Traces Plot
+            plot_stacked_traces(
+                raw_traces,
+                filepath=filepath_traces,
+                smoothing=ANALYSIS_SMOOTHING,
+            )
+
+            # 2. Fit Summary Plot (Raw Overlaid | Log Data)
             plot_analysis_summary(
                 delays,
                 amplitudes,
                 result,
                 raw_traces,
-                # Use unit from first trace if available
-                f"Delay ({raw_traces[0][0].metadata.get('time_unit', 's')})"
-                if raw_traces
-                else "Delay (s)",
+                # Use "Delay (s)" since we parsed it
+                "Delay (s)",
                 "Amplitude",
-                filepath=filepath,
+                filepath=filepath_fit,
+                smoothing=ANALYSIS_SMOOTHING,
             )
 
         # For T1/T2, constructing 'data' representing the XY for plot
@@ -514,63 +576,172 @@ def plot_combined_t2(
         plt.show()
 
 
+def plot_stacked_traces(
+    raw_traces: List[Tuple[NMRData, float, float, float, np.ndarray]],
+    filepath: Optional[Path] = None,
+    smoothing: float = 1.0,
+):
+    """
+    Plot each raw trace in its own subplot, stacked vertically.
+    """
+    num_traces = len(raw_traces)
+    if num_traces == 0:
+        return
+
+    # Dynamic height: e.g., 2 inches per trace, min 6, max 50?
+    fig_height = max(6, num_traces * 3)
+    fig, axes = plt.subplots(num_traces, 1, figsize=(12, fig_height), sharex=True)
+
+    if num_traces == 1:
+        axes = [axes]
+
+    # Color Mapping
+    cmap = cm.viridis
+    norm = plt.Normalize(0, num_traces - 1 if num_traces > 1 else 1)
+
+    for i, (data, t_peak, amp, tau, all_peaks, *_) in enumerate(raw_traces):
+        ax = axes[i]
+        color = cmap(norm(i))
+        signal = np.abs(data.signal)
+
+        # Raw trace (faint)
+        ax.plot(data.time, signal, color=color, alpha=0.3)
+
+        # Smoothed trace (bold)
+        smoothed = gaussian_filter1d(signal, sigma=smoothing)
+        ax.plot(
+            data.time, smoothed, color=color, alpha=0.8, linestyle="-", linewidth=1.5
+        )
+
+        # Highlight selected peak
+        ax.scatter(
+            [t_peak],
+            [amp],
+            color="black",
+            marker="x",
+            s=80,
+            zorder=5,
+            label="Selected Peak",
+        )
+
+        # Plot ALL found peaks
+        if len(all_peaks) > 0:
+            ax.scatter(
+                data.time[all_peaks],
+                smoothed[all_peaks],
+                color="gray",
+                marker=".",
+                s=30,
+                zorder=4,
+                alpha=0.6,
+                label="Other Peaks",
+            )
+
+        unit = data.metadata.get("time_unit", "s")
+        ax.set_ylabel("Amplitude")
+
+        # User request: "name on top of the graph should be that number"
+        if "trace_label" in data.metadata:
+            ax.set_title(data.metadata["trace_label"])
+        else:
+            ax.set_title(f"Trace {i + 1}: $\\tau$={tau:.2e} {unit}")
+
+        ax.grid(True, alpha=0.5)
+        # Only legend on first or all? Maybe just markers match.
+        # ax.legend(loc="upper right", fontsize="small")
+
+    axes[-1].set_xlabel(f"Time ({raw_traces[0][0].metadata.get('time_unit', 's')})")
+
+    plt.tight_layout()
+    if filepath:
+        plt.savefig(filepath)
+        plt.close()
+    else:
+        plt.show()
+
+
 def plot_analysis_summary(
     x,
     y,
     result: AnalysisResult,
-    raw_traces: List[Tuple[NMRData, float, float]],
+    raw_traces: List[Tuple[NMRData, float, float, float, np.ndarray]],
     xlabel,
     ylabel,
     filepath: Optional[Path] = None,
+    smoothing: float = 1.0,
 ):
     """
-    Plot Fit Result and Raw Traces in a split figure (Linear | Log).
+    Plot Fit Result and Raw Traces in a split figure:
+    1. Raw Traces (faint) + Smoothed Traces (bold) + Selected Peaks (Overlaid)
+    2. Fit (Log)
     """
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    fig, (ax_traces, ax_log) = plt.subplots(1, 2, figsize=(16, 6))
 
     # Color Mapping
     cmap = cm.viridis
     num_traces = len(raw_traces)
     norm = plt.Normalize(0, num_traces - 1 if num_traces > 1 else 1)
 
-    # --- Plot 1: Full Data (Linear) ---
-    # Raw Traces (faint)
-    for i, (data, t, amp) in enumerate(raw_traces):
+    # --- Plot 1: Raw Traces (Time Domain) ---
+    for i, (data, t_peak, amp, tau, all_peaks, *_) in enumerate(raw_traces):
         color = cmap(norm(i))
-        ax1.plot(data.time, np.abs(data.signal), color=color, alpha=0.3)
-        # Highlight points
-        ax1.scatter([t], [amp], color=color, marker="x", s=50, zorder=5)
+        signal = np.abs(data.signal)
+        # Raw trace (faint)
+        ax_traces.plot(data.time, signal, color=color, alpha=0.3)
 
-    # Fit Curve (Linear)
-    # Reconstruct or just plot fit points? Fit result typically fits to delays (x)
-    sorted_pairs = sorted(zip(x, result.fit_curve))
-    sx, sy = zip(*sorted_pairs)
-    ax1.plot(sx, sy, label="Fit", color="red", linestyle="-", zorder=6)
+        # Smoothed trace (bold)
+        smoothed = gaussian_filter1d(signal, sigma=smoothing)
+        ax_traces.plot(
+            data.time, smoothed, color=color, alpha=0.8, linestyle="-", linewidth=1.5
+        )
 
-    ax1.set_xlabel(xlabel)
-    ax1.set_ylabel(ylabel)
-    ax1.set_title(f"{result.dataset_name} (Linear)")
-    ax1.grid(True, alpha=0.5)
-    ax1.legend(loc="best")
+        # Highlight selected peak
+        ax_traces.scatter(
+            [t_peak],
+            [amp],
+            color="black",
+            marker="x",
+            s=80,
+            zorder=5,
+            label="Selected Peak" if i == 0 else None,
+        )
 
-    # --- Plot 2: Decay (Log) ---
-    # Points + Fit
-    # Use same colors for points? Or just one color since no raw traces context?
-    # Let's use the color map so it matches
-    for i, (data, t, amp) in enumerate(raw_traces):
-        color = cmap(norm(i))
-        ax2.scatter([t], [amp], color=color, marker="x", s=80, zorder=5)
+        # Plot ALL found peaks
+        if len(all_peaks) > 0:
+            ax_traces.scatter(
+                data.time[all_peaks],
+                smoothed[all_peaks],
+                color="gray",
+                marker=".",
+                s=30,
+                zorder=4,
+                alpha=0.6,
+                label="Other Peaks" if i == 0 else None,
+            )
 
-    # Fit Curve (Log)
-    ax2.plot(sx, sy, label="Fit", color="red", linestyle="--", zorder=6)
+    ax_traces.set_xlabel(f"Time ({raw_traces[0][0].metadata.get('time_unit', 's')})")
+    ax_traces.set_ylabel("Signal Amplitude")
+    ax_traces.set_title("Raw Traces & Selected Peaks")
+    ax_traces.legend(loc="upper right")
+    ax_traces.grid(True, alpha=0.5)
 
-    ax2.set_xlabel(xlabel)
-    ax2.set_ylabel(f"{ylabel} (Log)")
-    ax2.set_title("Decay (Log)")
-    ax2.set_yscale("log")
-    ax2.set_ylim(bottom=1)
-    ax2.grid(True, which="both", alpha=0.5)
-    ax2.legend(loc="best")
+    # --- Plot 2: Fit (Log) ---
+    # Plot data points
+    ax_log.scatter(x, y, c="blue", label="Data Points", zorder=3)
+
+    # Fit Curve
+    if result.fit_curve is not None:
+        sorted_pairs = sorted(zip(x, result.fit_curve))
+        sx, sy = zip(*sorted_pairs)
+        ax_log.plot(sx, sy, label="Fit", color="red", linestyle="--", zorder=6)
+
+    ax_log.set_xlabel(xlabel)
+    ax_log.set_ylabel(f"{ylabel} (Log)")
+    ax_log.set_title(f"{result.dataset_name} (Log Scale)")
+    ax_log.set_yscale("log")
+    ax_log.set_ylim(bottom=1)
+    ax_log.grid(True, which="both", alpha=0.5)
+    ax_log.legend(loc="best")
 
     plt.tight_layout()
     if filepath:
@@ -581,7 +752,7 @@ def plot_analysis_summary(
 
 
 if __name__ == "__main__":
-    for week in ("2.1", "2.2"):
+    for week in ("2.2",):
         analyze(
             Path(rf"H:\My Drive\Lab C\NMR\week{week}"),
             experiment=None,

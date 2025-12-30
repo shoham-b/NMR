@@ -41,16 +41,59 @@ def extract_echo_train(
     peaks, _ = find_peaks(detection_signal, distance=min_distance, height=height)
 
     peak_times = data.time[peaks]
-    peak_amps = signal[peaks]  # Return original amplitudes
+    peak_amps = detection_signal[peaks]  # Return smoothed amplitudes
 
     return peak_times, peak_amps
+
+
+def filter_peaks_time_window(
+    data: NMRData,
+    peak_indices: np.ndarray,
+    peak_amplitudes: np.ndarray,
+    min_time_sep: float,
+) -> np.ndarray:
+    """
+    Filter peaks such that no two peaks are closer than min_time_sep.
+    If peaks are too close, keep the one with the higher amplitude.
+    """
+    if len(peak_indices) == 0:
+        return peak_indices
+
+    # Sort by amplitude descending
+    sorted_by_amp = np.argsort(peak_amplitudes)[::-1]
+
+    accepted_indices = []
+    peak_times = data.time[peak_indices]
+
+    for idx_in_peaks in sorted_by_amp:
+        current_idx = peak_indices[idx_in_peaks]
+        current_time = peak_times[idx_in_peaks]
+
+        # Check against accepted
+        is_close = False
+        for accepted_idx in accepted_indices:
+            accepted_time = data.time[accepted_idx]
+            if abs(current_time - accepted_time) < min_time_sep:
+                is_close = True
+                break
+
+        if not is_close:
+            accepted_indices.append(current_idx)
+
+    # Return sorted by index (time)
+    return np.array(sorted(accepted_indices))
 
 
 def extract_peak_by_index(
     data: NMRData,
     peak_index: int = 3,
     smoothing: float = 0.0,
-) -> Tuple[float, float, int]:
+    min_distance: int = 20,
+    min_height: float = 0.2,
+    threshold_rel: float = 0.1,
+    prominence: float = 1.3,
+    min_time_sep: float = 0.3,
+) -> Tuple[float, float, int, np.ndarray]:
     """
     Extract a specific peak (by index) from the echo train.
 
@@ -58,9 +101,13 @@ def extract_peak_by_index(
         data: NMRData object.
         peak_index: Index of the peak to extract (0-based). Default 2 for 3rd peak.
         smoothing: Sigma for Gaussian smoothing (0 to disable).
+        min_distance: Minimum distance between peaks (indices).
+        min_height: Absolute minimum height threshold.
+        threshold_rel: Relative threshold of max peak to consider.
+        min_time_sep: Minimum time separation to enforce (keep highest).
 
     Returns:
-        Tuple of (time, amplitude, raw_data_index)
+        Tuple of (time, amplitude, raw_data_index, all_peaks_indices)
     """
     signal = np.abs(data.signal)
 
@@ -68,18 +115,28 @@ def extract_peak_by_index(
     if smoothing > 0:
         detection_signal = gaussian_filter1d(signal, sigma=smoothing)
 
-    peaks, _ = find_peaks(detection_signal)
+    # Robust peak finding with looser constraints initially
+    max_sig = np.max(detection_signal)
+    height = max(min_height, max_sig * threshold_rel)
+
+    peaks, _ = find_peaks(
+        detection_signal, distance=min_distance, height=height, prominence=prominence
+    )
+
+    # Apply Time Window Filtering (Highest peak within 0.1s)
+    if min_time_sep > 0:
+        peaks = filter_peaks_time_window(
+            data, peaks, detection_signal[peaks], min_time_sep
+        )
 
     if len(peaks) <= peak_index:
-        # Fallback: if smoothing caused fewer peaks, try without?
-        # Or simply error. The user implies smoothing is better.
         raise ValueError(
             f"Not enough peaks found. Found {len(peaks)}, required index {peak_index}"
         )
 
     idx = peaks[peak_index]
-    # Return time, ORIGINAL signal amplitude, and index
-    return data.time[idx], signal[idx], idx
+    # Return time, SMOOTHED signal amplitude, index, and ALL found peak indices
+    return data.time[idx], detection_signal[idx], idx, peaks
 
 
 def extract_second_highest_peak(
