@@ -38,4 +38,5 @@ class AnalysisResult:
     fit_curve: np.ndarray
     residuals: np.ndarray
     r_squared: float
+    param_errors: Dict[str, float] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)

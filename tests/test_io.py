@@ -33,7 +33,7 @@ def test_loader_robustness(tmp_path):
         grp = f.create_group("Some/Other/Path")
         grp.create_dataset("Data", data=np.array([4, 5, 6]))
 
-    with pytest.raises(ValueError, match="Group not found"):
+    with pytest.raises(RuntimeError, match="Group not found"):
         loader.load(file_path2)
 
     # 3. Direct Dataset (unlikely for Keysight but robust check)
@@ -53,7 +53,7 @@ def test_filename_parsing():
     assert parse_time_from_filename("data_10ms.h5") == 0.01
     assert parse_time_from_filename("T1_0_005.HDF5") == 0.005
     assert parse_time_from_filename("0_005.HDF5") == 0.005
-    assert parse_time_from_filename("200us_data") == 0.0002
+    assert parse_time_from_filename("200us_data") == pytest.approx(0.0002)
     assert parse_time_from_filename("random_name") == 0.0
 
 
@@ -68,8 +68,16 @@ def test_unit_extraction(tmp_path):
         dset1.attrs["XOrigin"] = 0.0
 
         # Unit structure
-        xdata_group = root.create_group("xdata_chan")
-        xdata_group.create_dataset("BVAxisUnitLabel", data=np.array(["s"], dtype="S"))
+        # Unit structure
+        # Updated per new loader requirement
+        # xdata_group = root.create_group("xdata_chan")
+        # xdata_group.create_dataset("BVAxisUnitLabel", data=np.array(["s"], dtype="S"))
+
+        # New path: /__BV_Dataset__Data__/data_chan1_capture1/___BV___CUSTOM_LONG_METADATA__XUnits
+        # Note: data_chan1_capture1 group (g1) already exists from above
+        g1.create_dataset(
+            "___BV___CUSTOM_LONG_METADATA__XUnits", data=np.array(["s"], dtype="S")
+        )
 
     loader = KeysightLoader(channel="Channel 1")
     data = loader.load(file_path)

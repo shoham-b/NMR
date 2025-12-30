@@ -9,21 +9,14 @@ class Fitter:
     @staticmethod
     def fit_t1(
         delays: np.ndarray, amplitudes: np.ndarray
-    ) -> Tuple[dict, np.ndarray, np.ndarray, float]:
+    ) -> Tuple[dict, np.ndarray, np.ndarray, float, dict]:
         """
         Fit T1 Inversion Recovery data.
-        Returns: params, fit_curve, residuals, r_squared
+        Returns: params, fit_curve, residuals, r_squared, param_errors
         """
         # Initial guess
-        # M0 is approx max amplitude
-        # T1 is approx time to 1/e or zero crossing?
-        # Inversion recovery: starts negative? Or we taking absolute magnitude?
-        # If magnitude, model is |M0 (1 - 2 exp(-t/T1))|.
-        # For simplicity assuming signed data or user passes signed amplitudes.
-        # If amplitudes are absolute, we need a different model or robust guess.
-
         M0_guess = np.max(np.abs(amplitudes))
-        T1_guess = np.mean(delays)  # Very rough
+        T1_guess = np.mean(delays) if len(delays) > 0 else 1.0
         p0 = [M0_guess, T1_guess, 1.0]
 
         try:
@@ -35,19 +28,29 @@ class Fitter:
             ss_tot = np.sum((amplitudes - np.mean(amplitudes)) ** 2)
             r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0.0
 
-            return {"M0": M0, "T1": T1, "alpha": alpha}, fit_curve, residuals, r2
-        except RuntimeError:
-            return {}, np.zeros_like(delays), np.zeros_like(delays), 0.0
+            perr = np.sqrt(np.diag(pcov))
+            param_errors = {"M0": perr[0], "T1": perr[1], "alpha": perr[2]}
+
+            return (
+                {"M0": M0, "T1": T1, "alpha": alpha},
+                fit_curve,
+                residuals,
+                r2,
+                param_errors,
+            )
+        except (RuntimeError, ValueError):
+            return {}, np.zeros_like(delays), np.zeros_like(delays), 0.0, {}
 
     @staticmethod
     def fit_t2(
         delays: np.ndarray, amplitudes: np.ndarray
-    ) -> Tuple[dict, np.ndarray, np.ndarray, float]:
+    ) -> Tuple[dict, np.ndarray, np.ndarray, float, dict]:
         """
         Fit T2 Spin Echo decay.
+        Returns: params, fit_curve, residuals, r_squared, param_errors
         """
-        M0_guess = np.max(amplitudes)
-        T2_guess = np.mean(delays)
+        M0_guess = np.max(amplitudes) if len(amplitudes) > 0 else 1.0
+        T2_guess = np.mean(delays) if len(delays) > 0 else 1.0
         p0 = [M0_guess, T2_guess, 0.0]
 
         try:
@@ -55,13 +58,24 @@ class Fitter:
             M0, T2, offset = popt
             fit_curve = t2_decay_model(delays, *popt)
             residuals = amplitudes - fit_curve
+
+            # Simple R2
             ss_res = np.sum(residuals**2)
             ss_tot = np.sum((amplitudes - np.mean(amplitudes)) ** 2)
-            r2 = 1 - (ss_res / ss_tot)
+            r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0.0
 
-            return {"M0": M0, "T2": T2, "offset": offset}, fit_curve, residuals, r2
-        except RuntimeError:
-            return {}, np.zeros_like(delays), np.zeros_like(delays), 0.0
+            perr = np.sqrt(np.diag(pcov))
+            param_errors = {"M0": perr[0], "T2": perr[1], "offset": perr[2]}
+
+            return (
+                {"M0": M0, "T2": T2, "offset": offset},
+                fit_curve,
+                residuals,
+                r2,
+                param_errors,
+            )
+        except (RuntimeError, ValueError):
+            return {}, np.zeros_like(delays), np.zeros_like(delays), 0.0, {}
 
     @staticmethod
     def fit_t2_star(
@@ -96,8 +110,9 @@ class Fitter:
         tail_length = n_samples - peak_idx
 
         # 20% of tail
-        # Using hardcoded values as per instruction, ignoring `trim_percent` for this logic.
-        start_trim_factor = 0.2
+        # User updated requirement: "take the data only starting with the highest amplitude"
+        # So start_trim_factor should be 0.0
+        start_trim_factor = 0.0
         end_trim_factor = 0.1
 
         global_start_fit_idx = peak_idx + int(tail_length * start_trim_factor)
@@ -157,6 +172,15 @@ class Fitter:
             ss_tot = np.sum((mag_fit - np.mean(mag_fit)) ** 2)
             r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0.0
 
+            # Calculate parameter errors (std dev)
+            perr = np.sqrt(np.diag(pcov))
+            # Parameters are: M0, T2_star, offset
+            param_errors = {
+                "M0": perr[0],
+                "T2_star": perr[1],
+                "offset": perr[2],
+            }
+
             return AnalysisResult(
                 experiment_type=ExperimentType.T2_STAR,
                 dataset_name="T2* Analysis",
@@ -164,6 +188,7 @@ class Fitter:
                 fit_curve=full_fit_curve,
                 residuals=full_residuals,
                 r_squared=r2,
+                param_errors=param_errors,
                 metadata={
                     "source": "smoothed_fit_v2",
                     "start_index": global_start_fit_idx,

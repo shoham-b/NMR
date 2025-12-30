@@ -17,7 +17,7 @@ def test_t1_fitting():
     # Add noise
     signal += np.random.normal(0, 1.0, size=delays.shape)
 
-    params, fit_curve, residuals, r2 = Fitter.fit_t1(delays, signal)
+    params, fit_curve, residuals, r2, perr = Fitter.fit_t1(delays, signal)
 
     assert r2 > 0.95
     assert np.isclose(params["M0"], M0, rtol=0.2)
@@ -33,7 +33,7 @@ def test_t2_fitting():
     signal = t2_decay_model(delays, M0, T2, 0.0)
     signal += np.random.normal(0, 1.0, size=delays.shape)
 
-    params, fit_curve, residuals, r2 = Fitter.fit_t2(delays, signal)
+    params, fit_curve, residuals, r2, perr = Fitter.fit_t2(delays, signal)
 
     assert r2 > 0.95
     assert np.isclose(params["M0"], M0, rtol=0.2)
