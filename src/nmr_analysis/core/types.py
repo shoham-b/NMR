@@ -10,6 +10,7 @@ class ExperimentType(str, Enum):
     T2 = "t2"
     T2_STAR = "t2_star"
     T2_COMBINED = "t2_combined"
+    DIFFUSION = "diffusion"
 
 
 @dataclass

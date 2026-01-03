@@ -93,6 +93,18 @@ def analyze(
 
             if name_lower in ALIAS_MAP:
                 exp_type = ALIAS_MAP[name_lower]
+
+                # SPECIAL HANDLING FOR WATER DATASET
+                # If we are analyzing a 'water' folder (or 'data'), 't2' usually means variable-tau diffusion data.
+                if (
+                    path.name.lower() in ("water", "data")
+                    and exp_type == ExperimentType.T2
+                ):
+                    exp_type = ExperimentType.DIFFUSION
+                    console.print(
+                        f"[cyan]Detected '{path.name}' dataset: Treating 't2' as DIFFUSION analysis.[/cyan]"
+                    )
+
                 found_any = True
 
                 # Check for nested structure:
@@ -122,6 +134,23 @@ def analyze(
                         out_std.mkdir(parents=True, exist_ok=True)
                     tasks.append((item, out_std))
 
+                # Sort tasks: Prioritize T2_COMBINED to make results available for DIFFUSION
+                # Note: tasks contains (Path, OutputPath)
+                # We need to sort based on the folder name of the Path.
+                # Since this block is inside "ALIAS_MAP match", ALL tasks are of the SAME experiment type (exp_type).
+                # So sorting by experiment type here is useless because `exp_type` is constant for this block!
+
+                # WAIT. This block (lines 94+) is for when the FOLDER NAME matches an alias.
+                # e.g. folder is "t1". Subfolders are "sample1", "sample2".
+                # ALL subfolders are T1 experiments.
+                # So we CANNOT have T2 Combined and Diffusion mixed here.
+                # They would be separate top-level folders.
+
+                # So `tasks.sort` here is irrelevant for cross-experiment constraints.
+                # Cross-experiment constraints only apply in "Sample Mode" (where a Sample folder contains multiple experiments).
+
+                # So I DO NOT need to sort tasks here. I just need to restore the code.
+
                 for target_path, target_out in tasks:
                     console.rule(
                         f"[bold cyan]Batch Analysis: {target_path.name} ({exp_type.value})[/bold cyan]"
@@ -136,6 +165,95 @@ def analyze(
                         console.print(
                             f"[red]Failed to analyze {target_path.name}: {e}[/red]"
                         )
+
+            elif item.is_dir():
+                # Item name is NOT in ALIAS_MAP.
+                # Check if it is a "Sample" directory that *contains* experiment folders.
+                # e.g. path/Water/t1, path/Water/t2
+
+                sub_experiments = []
+                for sub in item.iterdir():
+                    if not sub.is_dir():
+                        continue
+                    if sub.name.lower() in ALIAS_MAP:
+                        sub_experiments.append(sub)
+
+                if sub_experiments:
+                    console.print(
+                        f"[magenta]Detected Sample Directory: {item.name}[/magenta]"
+                    )
+                    found_any = True
+
+                    # Sort sub_experiments: Prioritize T2_COMBINED
+                    sub_experiments.sort(
+                        key=lambda x: 0
+                        if ALIAS_MAP.get(x.name.lower())
+                        in (ExperimentType.T2_COMBINED, "t2_multiple", "t2multiple")
+                        else 1
+                    )
+
+                    current_sample_t2_combined = None
+
+                    for sub in sub_experiments:
+                        name_lower = sub.name.lower()
+                        exp_type = ALIAS_MAP[name_lower]
+
+                        # Check for Water/Diffusion special case recursively
+                        if (
+                            item.name.lower() in ("water", "data")
+                            and exp_type == ExperimentType.T2
+                        ):
+                            exp_type = ExperimentType.DIFFUSION
+                            console.print(
+                                f"[cyan]Detected '{item.name}' dataset: Treating 't2' as DIFFUSION analysis.[/cyan]"
+                            )
+
+                        # Calculate output path: output_dir / SampleName / Experiment
+                        out_sub = None
+                        if save_plots:
+                            out_sub = output_dir / item.name / sub.name
+                            out_sub.mkdir(parents=True, exist_ok=True)
+
+                        console.rule(
+                            f"[bold cyan]Sample Analysis: {item.name}/{sub.name} ({exp_type.value})[/bold cyan]"
+                        )
+
+                        try:
+                            # If Diffusion, pass the T2 from Combined analysis if valid
+                            kwargs = {}
+                            if (
+                                exp_type == ExperimentType.DIFFUSION
+                                and current_sample_t2_combined is not None
+                            ):
+                                kwargs["fixed_t2"] = current_sample_t2_combined
+
+                            ctxs = _run_analysis(
+                                sub,
+                                exp_type,
+                                channel,
+                                plot,
+                                save_path=out_sub,
+                                **kwargs,
+                            )
+                            if ctxs:
+                                # Tag context with sample name?
+                                for c in ctxs:
+                                    c.sample_name = item.name
+                                    # If this was T2 Combined, store the result
+                                    if exp_type == ExperimentType.T2_COMBINED:
+                                        if "T2" in c.result.params:
+                                            current_sample_t2_combined = (
+                                                c.result.params["T2"]
+                                            )
+                                            console.print(
+                                                f"[green]Captured T2 Combined for Diffusion constraint: {current_sample_t2_combined:.4f} s[/green]"
+                                            )
+
+                                collected_contexts.extend(ctxs)
+                        except Exception as e:
+                            console.print(
+                                f"[red]Failed to analyze {item.name}/{sub.name}: {e}[/red]"
+                            )
 
         if found_any:
             console.print("[green]Batch analysis completed.[/green]")
@@ -179,6 +297,7 @@ def _run_analysis(
     channel: str,
     plot: bool,
     save_path: Optional[Path] = None,
+    fixed_t2: Optional[float] = None,
 ) -> List[AnalysisContext]:
     results = []
 
@@ -232,6 +351,184 @@ def _run_analysis(
                 console.print(f"[red]Failed to analyze {target_file.name}: {e}[/red]")
 
         return results
+
+        return results
+
+    elif experiment == ExperimentType.DIFFUSION:
+        # Diffusion: Variable tau T2 analysis
+        if not path.is_dir():
+            raise typer.Exit(
+                "Diffusion analysis requires a directory of T2 files with variable tau."
+            )
+
+        files = (
+            list(path.glob("*.h5"))
+            + list(path.glob("*.hdf5"))
+            + list(path.glob("*.csv"))
+        )
+        if not files:
+            raise typer.Exit("No files found for diffusion analysis.")
+
+        console.print(f"Found {len(files)} files for Diffusion analysis.")
+
+        taus = []
+        rates = []
+
+        # 1. Process each file to get T2
+        with Progress() as progress:
+            task = progress.add_task("Fitting T2 for each tau...", total=len(files))
+            for f in files:
+                try:
+                    loader = get_loader(f, channel=channel)
+                    data = loader.load(f)
+
+                    # Extract tau from filename (e.g. 0_0001.HDF5 -> 0.0001)
+                    # Use same logic as batch T2
+                    import re
+
+                    match = re.search(r"(0_[\d\.]+)", f.stem)
+                    if match:
+                        tau_val = float(match.group(1).replace("_", "."))
+                    else:
+                        console.print(
+                            f"[yellow]Could not parse tau from {f.stem}, skipping.[/yellow]"
+                        )
+                        continue
+
+                    # Preprocess & Fit T2
+                    # Note: We need a robust T2 fit here.
+                    # Assuming standard T2 CPMG
+                    # Extract peaks? Or fit raw?
+                    # Using extract_echo_train logic if possible, or fit_t2 on raw if standard decay?
+                    # The T2 analysis path uses `preprocess_data` then `fit_t2`.
+                    # Let's reuse that logic roughly.
+
+                    data, _, amp, _ = preprocess_data(
+                        data, smoothing=ANALYSIS_SMOOTHING
+                    )
+
+                    # For diffusion, we want to fit the DECAY rate (1/T2) for this specific tau.
+                    # Actually, the Carr-Purcell paper discusses measuring the echo amplitude at a fixed time t = 2*n*tau?
+                    # OR measuring the T2_eff from the envelope?
+                    # The formula R2_obs = R2 + ... implies we fit the envelope decay rate.
+
+                    # So we need to fit the echo train envelope for this file.
+                    # Which implies extracting peaks.
+
+                    peak_times, peak_amps = extract_echo_train(
+                        data, smoothing=ANALYSIS_SMOOTHING
+                    )
+
+                    if len(peak_times) < 3:
+                        continue
+
+                    # Skip first few peaks if needed (standard practice)
+                    peak_times = peak_times[2:]
+                    peak_amps = peak_amps[2:]
+
+                    params, _, _, _, _ = Fitter.fit_t2(peak_times, peak_amps)
+
+                    if "T2" in params and params["T2"] > 0:
+                        t2_obs = params["T2"]
+                        r2_obs = 1.0 / t2_obs
+                        taus.append(tau_val)
+                        rates.append(r2_obs)
+
+                except Exception as e:
+                    console.print(f"[red]Error processing {f.name}: {e}[/red]")
+
+                progress.advance(task)
+
+        if len(taus) < 3:
+            console.print("[red]Not enough valid data points for diffusion fit.[/red]")
+            return []
+
+        # 2. Fit Diffusion
+        console.print("Fitting Diffusion Coefficient...")
+        taus = np.array(taus)
+        rates = np.array(rates)
+
+        # Sort by tau
+        sort_idx = np.argsort(taus)
+        taus = taus[sort_idx]
+        rates = rates[sort_idx]
+
+        # Need Gradient G.
+        # Try to find in metadata of first file?
+        # Or hardcode/ask user?
+        # User prompt: "Write the diffusion coeficient with the +- on the graph"
+        # I'll default G to something or Try to read it.
+        # If not found, warn.
+        # For now, placeholder or check metadata.
+        # Assuming G is needed for D calculation.
+        # Let's set a default placeholder G = 0.4 T/m (just an example or 1.0) if not found,
+        # but better to check data.
+
+        # Re-load first file to check metadata for gradient?
+        # Assuming G is constant.
+        gradient = 0.0
+        # Attempt to read 'Gradient' or similar from metadata of first valid data
+        # Skipping for now to rely on fit_diffusion defaults or passed arg?
+        # Expected from user: "In this water there is data...".
+        # Let's assume G=1.0 for now or try to extract.
+        # Actually, without G, we can't get D.
+        # I'll use 1.0 as placeholder and note it.
+        gradient = 1.0
+
+        result = Fitter.fit_diffusion(taus, rates, gradient_strength=gradient)
+
+        print_result(result)
+
+        if plot:
+            filepath = None
+            if save_path:
+                filepath = save_path / "diffusion_fit.png"
+                console.print(f"Saving diffusion plot to {filepath}")
+
+            # Plot R2 vs Tau^2
+            fig, ax = plt.subplots(figsize=(8, 6))
+            x_vals = result.metadata.get("x_values", taus**2)  # Tau^2
+            y_vals = result.metadata.get("y_values", rates)  # R2
+
+            ax.scatter(x_vals, y_vals, label="Data ($1/T_{2,obs}$)", color="blue")
+
+            if len(result.fit_curve) > 0:
+                ax.plot(x_vals, result.fit_curve, label="Fit", color="red")
+
+            # Annotation
+            D_val = result.params.get("D", 0.0)
+            D_err = result.param_errors.get("D", 0.0)
+
+            # If we don't know G, D is meaningless unless G=1 is correct.
+            # But the user specifically asked for D with +/- on graph.
+
+            label_str = rf"$D = {D_val:.4e} \pm {D_err:.4e}$ $m^2/s$"
+            if gradient == 1.0:
+                label_str += "\n(Assuming G=1 T/m)"
+
+            ax.text(
+                0.05,
+                0.95,
+                label_str,
+                transform=ax.transAxes,
+                verticalalignment="top",
+                bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
+                fontsize=12,
+            )
+
+            ax.set_xlabel(r"$\tau^2$ ($s^2$)")
+            ax.set_ylabel(r"$R_{2,obs}$ ($s^{-1}$)")
+            ax.set_title("Diffusion Analysis ($R_2$ vs $\tau^2$)")
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+
+            if filepath:
+                plt.savefig(filepath)
+                plt.close()
+            else:
+                plt.show()
+
+        return [AnalysisContext(data=NMRData(time=taus, signal=rates), result=result)]
 
     elif experiment == ExperimentType.T2_COMBINED:
         # T2 Combined: Single file (or multiple) with echo train

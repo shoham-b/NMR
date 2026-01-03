@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.optimize import curve_fit
-from typing import Tuple
+from typing import Tuple, Optional
 from nmr_analysis.core.types import NMRData, AnalysisResult, ExperimentType
 from nmr_analysis.analysis.models import t1_model, t2_decay_model
 
@@ -209,4 +209,127 @@ class Fitter:
                     "source": "smoothed_fit",
                     "error": "Fit Failed",
                 },
+            )
+
+    @staticmethod
+    def fit_diffusion(
+        tau_values: np.ndarray,
+        rates_r2: np.ndarray,
+        gradient_strength: float,
+        gyromagnetic_ratio: float = 2.675e8,  # Proton gamma (rad/s/T)
+        fixed_intercept: Optional[float] = None,
+    ) -> AnalysisResult:
+        """
+        Fit Diffusion Coefficient D from R2 vs tau^2.
+
+        Formula:
+        R2_obs = R2_intrinsic + (1/3) * D * gamma^2 * G^2 * tau^2
+
+        Let y = R2_obs
+        Let x = tau^2
+        slope = (1/3) * D * gamma^2 * G^2
+        intercept = R2_intrinsic
+
+        If fixed_intercept (R2_intrinsic) is provided:
+            y - R2_intrinsic = slope * x
+            Fit linear model through origin.
+        """
+        # Linear fit: y = mx + c
+        x_linear = tau_values**2
+        y_linear = rates_r2
+
+        slope = 0.0
+        intercept = 0.0
+
+        try:
+            if fixed_intercept is not None:
+                # Constrained fit: y = mx + c_fixed => y - c_fixed = mx
+                y_adj = y_linear - fixed_intercept
+
+                # Fit through origin: slope = sum(x*y) / sum(x^2)
+                # Check for zero denominator
+                sum_sq_x = np.sum(x_linear**2)
+                if sum_sq_x == 0:
+                    slope = 0.0
+                else:
+                    slope = np.sum(x_linear * y_adj) / sum_sq_x
+
+                intercept = fixed_intercept
+                predicted_y = slope * x_linear + intercept
+            else:
+                # Unconstrained Polyfit degree 1: returns [slope, intercept]
+                slope, intercept = np.polyfit(x_linear, y_linear, 1)
+                predicted_y = slope * x_linear + intercept
+
+            # Calculate D
+            gamma = gyromagnetic_ratio
+            G = gradient_strength
+
+            # Avoid divide by zero
+            if G == 0:
+                D = 0.0
+            else:
+                D = (3 * slope) / ((gamma**2) * (G**2))
+
+            # Calculate R2 (Coefficient of Determination) for the linear fit
+            ss_res = np.sum((y_linear - predicted_y) ** 2)
+            ss_tot = np.sum((y_linear - np.mean(y_linear)) ** 2)
+            r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0.0
+
+            # Estimate error in slope to get error in D
+            n = len(x_linear)
+            dof = n - 1 if fixed_intercept is not None else n - 2
+
+            if dof > 0:
+                # Standard error of slope
+                if fixed_intercept is not None:
+                    # For regression through origin:
+                    # Var(b) = sigma^2 / sum(x^2)
+                    sigma2 = ss_res / dof
+                    sx2 = np.sum(x_linear**2)
+                    std_err_slope = np.sqrt(sigma2 / sx2) if sx2 > 0 else 0.0
+                else:
+                    sx2 = np.sum((x_linear - np.mean(x_linear)) ** 2)
+                    sy_x2 = ss_res / dof  # variance of residuals
+                    std_err_slope = np.sqrt(sy_x2 / sx2) if sx2 > 0 else 0.0
+
+                # Propagate error to D
+                k = 3 / ((gamma**2) * (G**2)) if G != 0 else 0
+                std_err_D = k * std_err_slope
+            else:
+                std_err_D = 0.0
+
+            fit_curve = predicted_y  # This is R2_fit, not time domain
+
+            return AnalysisResult(
+                experiment_type=ExperimentType.DIFFUSION,
+                dataset_name="Diffusion Analysis",
+                params={
+                    "D": D,
+                    "R2_intrinsic": intercept,
+                    "T2_intrinsic": 1.0 / intercept if intercept > 0 else 0.0,
+                    "slope": slope,
+                },
+                fit_curve=fit_curve,
+                residuals=y_linear - predicted_y,
+                r_squared=r2,
+                param_errors={"D": std_err_D},
+                metadata={
+                    "gradient_strength": gradient_strength,
+                    "gamma": gyromagnetic_ratio,
+                    "x_values": x_linear,  # tau^2
+                    "y_values": y_linear,  # R2
+                    "fixed_intercept": fixed_intercept,
+                },
+            )
+
+        except Exception as e:
+            return AnalysisResult(
+                experiment_type=ExperimentType.DIFFUSION,
+                dataset_name="Diffusion Analysis (Fit Failed)",
+                params={},
+                fit_curve=np.array([]),
+                residuals=np.array([]),
+                r_squared=0.0,
+                metadata={"error": str(e)},
             )
