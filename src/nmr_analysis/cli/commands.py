@@ -18,6 +18,7 @@ from nmr_analysis.analysis.processing import (
 )
 from nmr_analysis.core.types import ExperimentType, AnalysisResult, NMRData
 from nmr_analysis.io.loader import get_loader
+from nmr_analysis.io.reporting import save_summary_csv
 from nmr_analysis.visualization.interactive import generate_dashboard, AnalysisContext
 
 ANALYSIS_SMOOTHING = 2.6
@@ -59,11 +60,19 @@ def analyze(
     interactive: bool = typer.Option(
         False, "--interactive", "-i", help="Generate interactive HTML report."
     ),
+    flat: bool = typer.Option(
+        False,
+        "--flat",
+        help="Save all outputs directly to output directory without subfolders.",
+    ),
 ):
     """
     Run analysis on NMR data. Supports batch processing of subdirectories.
     """
     collected_contexts: List[AnalysisContext] = []
+
+    if save_plots:
+        output_dir.mkdir(parents=True, exist_ok=True)
 
     # Batch Analysis Logic
     if path.is_dir() and experiment is None:
@@ -78,6 +87,7 @@ def analyze(
             "t2_star": ExperimentType.T2_STAR,
             "t2multiple": ExperimentType.T2_COMBINED,
             "t2_multiple": ExperimentType.T2_COMBINED,
+            "diffusion": ExperimentType.DIFFUSION,
         }
 
         found_any = False
@@ -95,15 +105,18 @@ def analyze(
                 exp_type = ALIAS_MAP[name_lower]
 
                 # SPECIAL HANDLING FOR WATER DATASET
-                # If we are analyzing a 'water' folder (or 'data'), 't2' usually means variable-tau diffusion data.
-                if (
-                    path.name.lower() in ("water", "data")
-                    and exp_type == ExperimentType.T2
-                ):
-                    exp_type = ExperimentType.DIFFUSION
-                    console.print(
-                        f"[cyan]Detected '{path.name}' dataset: Treating 't2' as DIFFUSION analysis.[/cyan]"
-                    )
+                # Logic refined:
+                # Water/t2 -> T2 (Standard)
+                # Water/t2_multiple -> DIFFUSION
+                # Water/t2_multiple -> DIFFUSION (DISABLED to allow T2 Spin Echo analysis)
+                if path.name.lower() in ("water", "data"):
+                    # if exp_type == ExperimentType.T2_COMBINED:
+                    #     exp_type = ExperimentType.DIFFUSION
+                    #     console.print(
+                    #         f"[cyan]Detected '{path.name}' dataset: Treating 't2_multiple' as DIFFUSION analysis.[/cyan]"
+                    #     )
+                    pass
+                    # Note: t2 remains ExperimentType.T2
 
                 found_any = True
 
@@ -123,15 +136,21 @@ def analyze(
                         # Output path mirrors structure: output_dir / ExperimentDir / SampleDir
                         out_sub = None
                         if save_plots:
-                            out_sub = output_dir / item.name / sub.name
-                            out_sub.mkdir(parents=True, exist_ok=True)
+                            if flat:
+                                out_sub = output_dir
+                            else:
+                                out_sub = output_dir / item.name / sub.name
+                                out_sub.mkdir(parents=True, exist_ok=True)
                         tasks.append((sub, out_sub))
                 else:
                     # Flat/Standard mode: Process the folder itself
                     out_std = None
                     if save_plots:
-                        out_std = output_dir / item.name
-                        out_std.mkdir(parents=True, exist_ok=True)
+                        if flat:
+                            out_std = output_dir
+                        else:
+                            out_std = output_dir / item.name
+                            out_std.mkdir(parents=True, exist_ok=True)
                     tasks.append((item, out_std))
 
                 # Sort tasks: Prioritize T2_COMBINED to make results available for DIFFUSION
@@ -146,9 +165,6 @@ def analyze(
                 # So we CANNOT have T2 Combined and Diffusion mixed here.
                 # They would be separate top-level folders.
 
-                # So `tasks.sort` here is irrelevant for cross-experiment constraints.
-                # Cross-experiment constraints only apply in "Sample Mode" (where a Sample folder contains multiple experiments).
-
                 # So I DO NOT need to sort tasks here. I just need to restore the code.
 
                 for target_path, target_out in tasks:
@@ -157,7 +173,12 @@ def analyze(
                     )
                     try:
                         ctxs = _run_analysis(
-                            target_path, exp_type, channel, plot, save_path=target_out
+                            target_path,
+                            exp_type,
+                            channel,
+                            plot,
+                            save_path=target_out,
+                            prefix=target_path.parent.name if flat else "",
                         )
                         if ctxs:
                             collected_contexts.extend(ctxs)
@@ -184,11 +205,13 @@ def analyze(
                     )
                     found_any = True
 
-                    # Sort sub_experiments: Prioritize T2_COMBINED
+                    # Sort sub_experiments: Prioritize T2 (to get T2 for Diffusion constraint)
+                    # 0: T2 (Highest Priority)
+                    # 1: Others
                     sub_experiments.sort(
                         key=lambda x: 0
                         if ALIAS_MAP.get(x.name.lower())
-                        in (ExperimentType.T2_COMBINED, "t2_multiple", "t2multiple")
+                        in (ExperimentType.T2, "t2", "t2_single")
                         else 1
                     )
 
@@ -199,20 +222,23 @@ def analyze(
                         exp_type = ALIAS_MAP[name_lower]
 
                         # Check for Water/Diffusion special case recursively
-                        if (
-                            item.name.lower() in ("water", "data")
-                            and exp_type == ExperimentType.T2
-                        ):
-                            exp_type = ExperimentType.DIFFUSION
-                            console.print(
-                                f"[cyan]Detected '{item.name}' dataset: Treating 't2' as DIFFUSION analysis.[/cyan]"
-                            )
+                        if item.name.lower() in ("water", "data"):
+                            # Override DISABLED to allow T2 Spin Echo analysis details
+                            # if exp_type == ExperimentType.T2_COMBINED:
+                            #     exp_type = ExperimentType.DIFFUSION
+                            #     console.print(
+                            #         f"[cyan]Detected '{item.name}' dataset: Treating 't2_multiple' as DIFFUSION analysis.[/cyan]"
+                            #     )
+                            pass
 
                         # Calculate output path: output_dir / SampleName / Experiment
                         out_sub = None
                         if save_plots:
-                            out_sub = output_dir / item.name / sub.name
-                            out_sub.mkdir(parents=True, exist_ok=True)
+                            if flat:
+                                out_sub = output_dir
+                            else:
+                                out_sub = output_dir / item.name / sub.name
+                                out_sub.mkdir(parents=True, exist_ok=True)
 
                         console.rule(
                             f"[bold cyan]Sample Analysis: {item.name}/{sub.name} ({exp_type.value})[/bold cyan]"
@@ -233,20 +259,21 @@ def analyze(
                                 channel,
                                 plot,
                                 save_path=out_sub,
+                                prefix=item.name if flat else "",
                                 **kwargs,
                             )
                             if ctxs:
                                 # Tag context with sample name?
                                 for c in ctxs:
                                     c.sample_name = item.name
-                                    # If this was T2 Combined, store the result
-                                    if exp_type == ExperimentType.T2_COMBINED:
+                                    # If this was T2 (Standard), store the result for Diffusion constraint
+                                    if exp_type == ExperimentType.T2:
                                         if "T2" in c.result.params:
                                             current_sample_t2_combined = (
                                                 c.result.params["T2"]
                                             )
                                             console.print(
-                                                f"[green]Captured T2 Combined for Diffusion constraint: {current_sample_t2_combined:.4f} s[/green]"
+                                                f"[green]Captured T2 for Diffusion constraint: {current_sample_t2_combined:.4f} s[/green]"
                                             )
 
                                 collected_contexts.extend(ctxs)
@@ -262,6 +289,12 @@ def analyze(
                 generate_dashboard(collected_contexts, output_html)
                 console.print(
                     f"[green]Interactive report saved to {output_html}[/green]"
+                )
+
+            if collected_contexts:
+                save_summary_csv(collected_contexts, output_dir)
+                console.print(
+                    f"[green]Summary CSV saved to {output_dir / 'summary.csv'}[/green]"
                 )
             return
 
@@ -298,6 +331,7 @@ def _run_analysis(
     plot: bool,
     save_path: Optional[Path] = None,
     fixed_t2: Optional[float] = None,
+    prefix: str = "",
 ) -> List[AnalysisContext]:
     results = []
 
@@ -335,7 +369,12 @@ def _run_analysis(
                         # If save_path is a directory (via batch or single with dir input), use it
                         # If single file input, save_path might be parent dir
                         out_dir = save_path if save_path.is_dir() else save_path.parent
-                        filepath = out_dir / f"{target_file.stem}_fit.png"
+                        fname = (
+                            f"{prefix}_{target_file.stem}_fit.png"
+                            if prefix
+                            else f"{target_file.stem}_fit.png"
+                        )
+                        filepath = out_dir / fname
                         console.print(f"Saving plot to {filepath.as_uri()}")
 
                     plot_result(
@@ -381,6 +420,7 @@ def _run_analysis(
                 try:
                     loader = get_loader(f, channel=channel)
                     data = loader.load(f)
+                    data.experiment_type = ExperimentType.DIFFUSION
 
                     # Extract tau from filename (e.g. 0_0001.HDF5 -> 0.0001)
                     # Use same logic as batch T2
@@ -395,25 +435,13 @@ def _run_analysis(
                         )
                         continue
 
-                    # Preprocess & Fit T2
-                    # Note: We need a robust T2 fit here.
-                    # Assuming standard T2 CPMG
-                    # Extract peaks? Or fit raw?
-                    # Using extract_echo_train logic if possible, or fit_t2 on raw if standard decay?
-                    # The T2 analysis path uses `preprocess_data` then `fit_t2`.
-                    # Let's reuse that logic roughly.
+                    # Preprocess & Fit T2 using NMRMINE logic
+                    # NMRMINE logic selects P1 and a specific echo (P2 or P3).
+                    # We use these 2 points to fit a T2 decay.
 
                     data, _, amp, _ = preprocess_data(
                         data, smoothing=ANALYSIS_SMOOTHING
                     )
-
-                    # For diffusion, we want to fit the DECAY rate (1/T2) for this specific tau.
-                    # Actually, the Carr-Purcell paper discusses measuring the echo amplitude at a fixed time t = 2*n*tau?
-                    # OR measuring the T2_eff from the envelope?
-                    # The formula R2_obs = R2 + ... implies we fit the envelope decay rate.
-
-                    # So we need to fit the echo train envelope for this file.
-                    # Which implies extracting peaks.
 
                     peak_times, peak_amps = extract_echo_train(
                         data, smoothing=ANALYSIS_SMOOTHING
@@ -422,9 +450,10 @@ def _run_analysis(
                     if len(peak_times) < 3:
                         continue
 
-                    # Skip first few peaks if needed (standard practice)
-                    peak_times = peak_times[2:]
-                    peak_amps = peak_amps[2:]
+                    # Remove manual peak skipping.
+                    # Logic is now same as T2 Combined: preprocess (trim) -> extract_echo_train (monotonic).
+                    # peak_times = peak_times[2:]
+                    # peak_amps = peak_amps[2:]
 
                     params, _, _, _, _ = Fitter.fit_t2(peak_times, peak_amps)
 
@@ -475,14 +504,25 @@ def _run_analysis(
         # I'll use 1.0 as placeholder and note it.
         gradient = 1.0
 
-        result = Fitter.fit_diffusion(taus, rates, gradient_strength=gradient)
+        # Calculate fixed_intercept (R2_intrinsic) if fixed_t2 is provided
+        fixed_intercept = None
+        if fixed_t2 is not None and fixed_t2 > 0:
+            fixed_intercept = 1.0 / fixed_t2
+            console.print(
+                f"Using fixed R2 intercept: {fixed_intercept:.4f} s^-1 (from T2={fixed_t2:.4f} s)"
+            )
+
+        result = Fitter.fit_diffusion(
+            taus, rates, gradient_strength=gradient, fixed_intercept=fixed_intercept
+        )
 
         print_result(result)
 
         if plot:
             filepath = None
             if save_path:
-                filepath = save_path / "diffusion_fit.png"
+                fname = f"{prefix}_diffusion_fit.png" if prefix else "diffusion_fit.png"
+                filepath = save_path / fname
                 console.print(f"Saving diffusion plot to {filepath}")
 
             # Plot R2 vs Tau^2
@@ -546,31 +586,94 @@ def _run_analysis(
         console.print(f"Loading {target_file}...")
         loader = get_loader(target_file, channel=channel)
         data = loader.load(target_file)
+        data.experiment_type = experiment
 
         console.print("Extracting Echo Train...")
-        # Paramaters for peak finding might need tuning or exposing
-        # Using defaults for now, with min_height=0.5 to filter noise
-        # Paramaters for peak finding might need tuning or exposing
-        # Using defaults for now, with min_height=0.5 to filter noise
-        # Paramaters for peak finding might need tuning or exposing
-        # Using defaults for now, with min_height=0.5 to filter noise
-        # User requested smoothing for peak finding
-        peak_times, peak_amps = extract_echo_train(data, smoothing=ANALYSIS_SMOOTHING)
+
+        # Use preprocess_data to trim data starting from Max/Pulse (Trimming Methodology)
+        # This ensures we work on the relevant slice starting at t=0
+        data, _, _, _ = preprocess_data(data, smoothing=ANALYSIS_SMOOTHING)
+
+        # Extract Echo Train using Monotonic Filter logic (NMRMINE)
+        (
+            peak_times,
+            peak_amps,
+            excluded_times,
+            excluded_amps,
+        ) = extract_echo_train(data, smoothing=ANALYSIS_SMOOTHING)
 
         if len(peak_times) < 3:
             console.print(
                 "[red]Not enough peaks found for T2 fit (need at least 3, so >2).[/red]"
             )
-            console.print(
-                "[red]Not enough peaks found for T2 fit (need at least 3, so >2).[/red]"
-            )
             return []
 
-        # Skip the first 2 peaks (start from 3rd peak onward)
-        peak_times = peak_times[2:]
-        peak_amps = peak_amps[2:]
+        # NMRMINE does not manually skip peaks if using Monotonic Filter + Trimming
+        # The filter itself removes noise/dips. The first peak (0) is the Pulse.
+        # Fits usually include the pulse if valid? Or start from echoes?
+        # "t2_multiple_analysis.py" fits "peak_times" from "valid_indices".
+        # If Pulse is valid (monotonic start), it is included.
+        # We assume strict adherence to repo logic means "use valid_indices".
+        # So we REMOVE the [2:] skip.
+        # peak_times = peak_times[2:]
+        # peak_amps = peak_amps[2:]
 
-        console.print(f"Using {len(peak_times)} peaks (skipped first 2). Fitting T2...")
+        console.print(
+            f"Using {len(peak_times)} peaks (Monotonic Filter applied). Fitting T2..."
+        )
+
+        # User Request: "in water combined fit remove the first second"
+        # Debugging: Verbose check
+        if "water" in str(target_file).lower():
+            console.print(f"[blue]Water dataset detected: {target_file.name}[/blue]")
+            console.print(
+                f"Total peaks before trim: {len(peak_times)}. Range: {peak_times[0]:.4f} - {peak_times[-1]:.4f} s"
+            )
+
+            mask = peak_times > 1.0
+            mask_exclude = ~mask
+
+            # Add trimmed peaks to excluded lists
+            excluded_times = np.concatenate((excluded_times, peak_times[mask_exclude]))
+            excluded_amps = np.concatenate((excluded_amps, peak_amps[mask_exclude]))
+
+            peak_times = peak_times[mask]
+            peak_amps = peak_amps[mask]
+
+            if len(peak_times) > 0:
+                console.print(
+                    f"Remaining peaks after 1.0s trim: {len(peak_times)}. Range: {peak_times[0]:.4f} - {peak_times[-1]:.4f} s"
+                )
+                # User Request: "Still use the argmax for starting at the highest index of after that one second"
+                # Find the index of the maximum amplitude in the REMAINING peaks
+                max_idx_after = np.argmax(peak_amps)
+                max_peak_time = peak_times[max_idx_after]
+                max_peak_amp = peak_amps[max_idx_after]
+
+                console.print(
+                    f"Max peak after 1.0s found at {max_peak_time:.4f}s (Amp: {max_peak_amp:.4f}). Trimming pre-max peaks."
+                )
+
+                # Add pre-max peaks to excluded
+                if max_idx_after > 0:
+                    excluded_times = np.concatenate(
+                        (excluded_times, peak_times[:max_idx_after])
+                    )
+                    excluded_amps = np.concatenate(
+                        (excluded_amps, peak_amps[:max_idx_after])
+                    )
+
+                # Slice from that max index onwards
+                peak_times = peak_times[max_idx_after:]
+                peak_amps = peak_amps[max_idx_after:]
+
+                console.print(
+                    f"Final peaks for fitting: {len(peak_times)}. Range: {peak_times[0]:.4f} - {peak_times[-1]:.4f} s"
+                )
+            else:
+                console.print(
+                    f"[red]WARNING: No peaks remaining after 1.0s trim![/red]"
+                )
 
         # Fit T2 to the peaks
         # Using 0 as initial time? Use relative time?
@@ -596,7 +699,12 @@ def _run_analysis(
             # We want: Raw Data + Peaks + Fit Curve on ONE graph
             filepath = None
             if save_path:
-                filepath = save_path / f"{target_file.stem}_combined_fit.png"
+                fname = (
+                    f"{prefix}_{target_file.stem}_combined_fit.png"
+                    if prefix
+                    else f"{target_file.stem}_combined_fit.png"
+                )
+                filepath = save_path / fname
                 console.print(f"Saving plot to {filepath}")
 
             plot_combined_t2(data, peak_times, peak_amps, result, filepath=filepath)
@@ -636,6 +744,7 @@ def _run_analysis(
                 try:
                     loader = get_loader(f, channel=channel)
                     data = loader.load(f)
+                    data.experiment_type = experiment
 
                     # Preprocess: Find peak, slice, and shift time to 0
                     # Returns processed_data, tau, amp, peak_info
@@ -744,8 +853,13 @@ def _run_analysis(
             filepath_traces = None
             if save_path:
                 dirname = path.name
-                filepath_fit = save_path / f"{dirname}_{experiment.value}_fit.png"
-                filepath_traces = save_path / f"{dirname}_{experiment.value}_traces.png"
+                p_str = f"{prefix}_" if prefix else ""
+                filepath_fit = (
+                    save_path / f"{p_str}{dirname}_{experiment.value}_fit.png"
+                )
+                filepath_traces = (
+                    save_path / f"{p_str}{dirname}_{experiment.value}_traces.png"
+                )
                 console.print(f"Saving fit plot to {filepath_fit}")
                 console.print(f"Saving traces plot to {filepath_traces}")
 
@@ -827,6 +941,19 @@ def plot_result(
                 zorder=5,
             )
 
+    # Plot Fit on Linear Scale
+    if result.fit_curve is not None:
+        ax_lin.plot(
+            x,
+            result.fit_curve,
+            label="Fit",
+            color="red",
+            alpha=0.8,
+            linewidth=2,
+            linestyle="--",
+            zorder=4,
+        )
+
     ax_lin.set_xlabel(xlabel)
     ax_lin.set_ylabel(ylabel)
     ax_lin.set_title(f"{result.dataset_name} (Linear)")
@@ -893,79 +1020,102 @@ def plot_combined_t2(
     peak_amps: np.ndarray,
     result: AnalysisResult,
     filepath: Optional[Path] = None,
+    excluded_times: Optional[np.ndarray] = None,
+    excluded_amps: Optional[np.ndarray] = None,
 ):
     """
-    Plot Raw Data, Peaks, and Fit Curve on a split graph (Linear | Log).
+    Plot T2 Combined analysis results (Echo Train Decay).
     """
+    unit = "s"  # Assume processed data is in seconds
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-    unit = data.metadata.get("time_unit", "s")
 
-    # --- Plot 1: Full Data (Linear) ---
-    ax1.plot(
-        data.time,
-        np.abs(data.signal),
-        label="Raw Echo Train",
-        color="skyblue",
-        alpha=0.6,
-    )
-
+    # Define colors for peaks based on index/time
     num_peaks = len(peak_times)
     cmap = cm.viridis
     norm = plt.Normalize(0, num_peaks - 1 if num_peaks > 1 else 1)
     colors = [cmap(norm(i)) for i in range(num_peaks)]
 
+    # --- Plot 1: Linear Scale (Raw + Fit) ---
+    # Plot raw echo train
+    ax1.plot(data.time, data.signal, label="Raw Echo Train", color="skyblue", alpha=0.6)
+
+    # Plot Extracted Peaks (Valid)
     ax1.scatter(
         peak_times,
         peak_amps,
         c=colors,
         marker="x",
-        s=80,
+        s=60,
         linewidths=2,
         zorder=5,
-        label="_nolegend_",
+        label="Peaks (Used)",
     )
 
-    if "M0" in result.params and "T2" in result.params:
-        M0 = result.params["M0"]
-        T2 = result.params["T2"]
-        offset = result.params.get("offset", 0.0)
-        full_fit_curve = t2_decay_model(data.time, M0, T2, offset)
-
-        label_fit = f"T2 Fit (T2={T2:.4e} {unit})"
-        if "T2" in result.param_errors:
-            err = result.param_errors["T2"]
-            label_fit = rf"T2 Fit ($T_2={T2:.4f} \pm {err:.4f}$ {unit})"
-
-        ax1.plot(
-            data.time,
-            full_fit_curve,
-            label=label_fit,
-            color="red",
-            linestyle="-",
-            zorder=6,
+    # Plot Excluded Peaks (If any)
+    if excluded_times is not None and len(excluded_times) > 0:
+        ax1.scatter(
+            excluded_times,
+            excluded_amps,
+            color="gray",
+            marker="x",
+            s=40,
+            linewidths=1,
+            alpha=0.5,
+            zorder=4,
+            label="Excluded Peaks",
         )
 
-        # Add textbox to ax1
-        err_t2 = result.param_errors.get("T2", 0.0)
-        err_m0 = result.param_errors.get("M0", 0.0)
-        text_str = (
-            rf"$T_2 = {T2:.4f} \pm {err_t2:.4f}$ {unit}"
-            + "\n"
-            + rf"$M_0 = {M0:.4e} \pm {err_m0:.4e}$"
-        )
+    # Plot Fit Curve
+    if result.fit_curve is not None:
+        # Generate smooth curve for display
+        # We need to use data.time range
+        # Note: fit function was M0 * exp(-t/T2) + offset
 
-        ax1.text(
-            0.95,
-            0.95,
-            text_str,
-            transform=ax1.transAxes,
-            fontsize=10,
-            verticalalignment="top",
-            horizontalalignment="right",
-            bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
-        )
-    else:
-        ax1.plot(peak_times, result.fit_curve, label="Fit", color="red", zorder=6)
+        if "M0" in result.params and "T2" in result.params:
+            M0 = result.params["M0"]
+            T2 = result.params["T2"]
+            offset = result.params.get("offset", 0.0)
+            full_fit_curve = t2_decay_model(data.time, M0, T2, offset)
+
+            label_fit = f"T2 Fit (T2={T2:.4e} {unit})"
+            if "T2" in result.param_errors:
+                err = result.param_errors["T2"]
+                label_fit = rf"T2 Fit ($T_2={T2:.4f} \pm {err:.4f}$ {unit})"
+
+            ax1.plot(
+                data.time,
+                full_fit_curve,
+                label=label_fit,
+                color="red",
+                linestyle="-",
+                zorder=6,
+            )
+
+            # Add textbox to ax1
+            err_t2 = result.param_errors.get("T2", 0.0)
+            err_m0 = result.param_errors.get("M0", 0.0)
+            text_str = (
+                rf"$T_2 = {T2:.4f} \pm {err_t2:.4f}$ {unit}"
+                + "\n"
+                + rf"$M_0 = {M0:.4e} \pm {err_m0:.4e}$"
+            )
+
+            ax1.text(
+                0.95,
+                0.95,
+                text_str,
+                transform=ax1.transAxes,
+                fontsize=10,
+                verticalalignment="top",
+                horizontalalignment="right",
+                bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
+            )
+        else:
+            # Fallback if no params (should not happen if fit succeeded)
+            if result.fit_curve is not None:
+                ax1.plot(
+                    peak_times, result.fit_curve, label="Fit", color="red", zorder=6
+                )
 
     ax1.set_xlabel(f"Time ({unit})")
     ax1.set_ylabel("Signal Magnitude")
@@ -1180,6 +1330,8 @@ def plot_analysis_summary(
     ax_traces.legend(loc="upper right")
     ax_traces.grid(True, alpha=0.5)
 
+    ax_traces.grid(True, alpha=0.5)
+
     # --- Plot 2: Fit (Log) ---
     # Plot data points
     ax_log.scatter(x, y, c="blue", label="Data Points", zorder=3)
@@ -1252,4 +1404,5 @@ if __name__ == "__main__":
             save_plots=True,
             output_dir=Path(__file__).parents[3] / "output" / week,
             interactive=False,
+            flat=True,
         )

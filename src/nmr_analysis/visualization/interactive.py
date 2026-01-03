@@ -350,6 +350,21 @@ def _add_traces_for_context(
                 col=1,
             )
 
+            # Overlay Fit Envelope on Raw Echo Train
+            if ctx.peak_times is not None and ctx.result.fit_curve is not None:
+                fig.add_trace(
+                    go.Scatter(
+                        x=ctx.peak_times,
+                        y=ctx.result.fit_curve,
+                        mode="lines",
+                        name=f"Fit Envelope (R²={ctx.result.r_squared:.4f})",
+                        line=dict(color=color_fit, width=3, dash="dash"),
+                        visible=False,
+                    ),
+                    row=1,
+                    col=1,
+                )
+
     # --- T2* ---
     elif experiment == ExperimentType.T2_STAR:
         # Filter > 1 for Log plot

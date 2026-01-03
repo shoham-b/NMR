@@ -27,23 +27,154 @@ def extract_echo_train(
     Returns:
         Tuple of (peak_times, peak_amplitudes)
     """
-    signal = np.abs(data.signal)
+    signal = (
+        data.signal
+    )  # Use signed signal for Max detection (as per NMRMINE T2 logic)
+    time = data.time
+
+    # Robustness: Trim to start from Global Max (Pulse)
+    # This aligns with the "Refined ArgMax Trimming"
+    start_idx = np.argmax(signal)
+    signal = signal[start_idx:]
+    # Shift time to be relative to the max
+    # Note: data.time might already be shifted if preprocess_data was called.
+    # If so, start_idx=0, time[0]=0. No change.
+    # If raw, this shifts it.
+    time_slice = time[start_idx:] - time[start_idx]
+
+    # Now use absolute signal for detection
+    detection_signal = np.abs(signal)
 
     # Use smoothed signal for detection
     detection_signal = signal
     if smoothing > 0:
         detection_signal = gaussian_filter1d(signal, sigma=smoothing)
 
+    # NMRMINE T2 Multiple Logic:
+    # 1. Broad peak finding
+    # height=0.05*max, distance=50, prominence=0.05*max (from t2_multiple_analysis.py)
     max_sig = np.max(detection_signal)
-    height = max(min_height, max_sig * threshold_rel)
 
-    # find_peaks returns indices
-    peaks, _ = find_peaks(detection_signal, distance=min_distance, height=height)
+    # We ignore input params min_height/distance if we want strict parity?
+    # But function signature allows overrides.
+    # Let's default to the repo values if defaults are used, or respect inputs?
+    # The repo hardcodes them. Let's rely on the inputs but defaults should match repo.
+    # Repo: height=0.05*max, distance=50
+    # Our func defaults: min_distance=10, min_height=0.5
 
-    peak_times = data.time[peaks]
-    peak_amps = detection_signal[peaks]  # Return smoothed amplitudes
+    # Let's implement the logic using the passed params BUT add the monotonic filtering which is the key.
 
-    return peak_times, peak_amps
+    # Use passed min_height as absolute floor, but also use relative floor from repo?
+    # Repo: height = 0.05 * max_val
+    thresh_height = max(min_height, max_sig * 0.05)  # Using 0.05 rel as per repo
+
+    # Distance: Repo uses 50. Our default is 10.
+    # If caller didn't specify distinct value (e.g. relying on default), we might want 50.
+    # But if caller passed 10, we should respect?
+    # For now, let's use the passed values but add the logic.
+
+    peaks_all, _ = find_peaks(
+        detection_signal,
+        distance=min_distance
+        if min_distance != 10
+        else 50,  # Use 50 if default? Risky.
+        height=thresh_height,
+        prominence=0.05 * max_sig,  # Repo uses 0.05 * max
+    )
+
+    # Ensure Global Max is present (index 0 usually?)
+    # Repo: if 0 not in peaks_all: insert 0
+    if 0 not in peaks_all:
+        peaks_all = np.sort(np.append(peaks_all, 0))
+    # detection_signal is |signal|.
+    # If pulse is at start...
+    # But wait, extract_echo_train is used on RAW data usually?
+    # t2_multiple_analysis.py slices data from max_idx first!
+    # "time_shifted = data.time - max_time ... slice from max onwards"
+    # So index 0 IS the max.
+
+    # Our function `extract_echo_train` takes `data` and uses it as is?
+    # No, usually we expect `preprocessing` to handle slicing?
+    # Currently `extract_echo_train` just runs on `data.signal`.
+    # If `data` is not sliced, we might find peaks everywhere.
+    # But `t2_multiple_analysis.py` SLICES first.
+
+    # Old Backwards Monotonic Filter (Disabled in favor of Forward Lookback)
+    # valid_indices = []
+    # max_amp_so_far = -1.0
+    # for i in range(len(peaks_all) - 1, -1, -1):
+    #     idx = peaks_all[i]
+    #     amp = detection_signal[idx]
+    #     if amp > max_amp_so_far:
+    #         valid_indices.append(idx)
+    # New Forward Lookback Logic (User Request)
+    # "If a peak is not monotonic, it can cancel up to 3 previous peaks, and use that peak"
+    # This replaces the Backwards Monotonic Filter.
+
+    # for i in range(len(peaks_all) - 1, -1, -1):
+    #     idx = peaks_all[i]
+    #     amp = detection_signal[idx]
+    #     if amp > max_amp_so_far:
+    #         valid_indices.append(idx)
+    # Monotonic Filter in Reverse (User Request)
+    # Start from last peak. Keep peak if it is > max_amp_so_far (from right).
+    # This filters out drops/noise that occur before a valid high echo.
+    # Effectively "Monotonic Ascending Backward".
+
+    peak_indices = peaks_all
+    peak_amps = detection_signal[peaks_all]
+
+    valid_indices = filter_peaks_monotonic_reverse(peak_indices, peak_amps)
+
+    # Valid indices have been selected by filter_peaks_monotonic_reverse
+
+    # Identify excluded indices
+    excluded_indices = np.setdiff1d(peak_indices, valid_indices)
+
+    # Restore time order for valid
+    valid_indices = sorted(valid_indices)
+    excluded_indices = sorted(excluded_indices)
+
+    peak_times = time_slice[valid_indices]
+    peak_amps = detection_signal[valid_indices]
+
+    excluded_times = time_slice[excluded_indices]
+    excluded_amps = detection_signal[excluded_indices]
+
+    return peak_times, peak_amps, excluded_times, excluded_amps
+
+
+def filter_peaks_monotonic_reverse(
+    peak_indices: np.ndarray, peak_amps: np.ndarray
+) -> np.ndarray:
+    """
+    Filter peaks to ensure they are Monotonically Ascending when viewed BACKWARDS.
+    (i.e. strictly decaying when viewed forwards, ignoring dips).
+
+    Logic:
+    Iterate backwards from the last peak.
+    Keep a peak ONLY if it is > max_amp_so_far.
+
+    Args:
+        peak_indices: Indices of peaks.
+        peak_amps: Amplitudes of peaks.
+
+    Returns:
+        np.ndarray: Indices of kept peaks, sorted in original time order (ascending).
+    """
+    valid_indices = []
+    max_amp_so_far = -1.0
+
+    # Iterate backwards
+    for i in range(len(peak_indices) - 1, -1, -1):
+        idx = peak_indices[i]
+        amp = peak_amps[i]
+        if amp > max_amp_so_far:
+            valid_indices.append(idx)
+            max_amp_so_far = amp
+
+    # Restore time order (valid_indices was built backwards)
+    return np.array(sorted(valid_indices))
 
 
 def filter_peaks_time_window(
@@ -57,31 +188,33 @@ def filter_peaks_time_window(
     If peaks are too close, keep the one with the higher amplitude.
     """
     if len(peak_indices) == 0:
-        return peak_indices
+        return np.array([])
 
     # Sort by amplitude descending
-    sorted_by_amp = np.argsort(peak_amplitudes)[::-1]
+    sorted_idx_indices = np.argsort(peak_amplitudes)[::-1]
 
-    accepted_indices = []
+    keep_mask = np.ones(len(peak_indices), dtype=bool)
     peak_times = data.time[peak_indices]
 
-    for idx_in_peaks in sorted_by_amp:
-        current_idx = peak_indices[idx_in_peaks]
-        current_time = peak_times[idx_in_peaks]
+    for i in range(len(sorted_idx_indices)):
+        idx_curr = sorted_idx_indices[i]
+        if not keep_mask[idx_curr]:
+            continue
 
-        # Check against accepted
-        is_close = False
-        for accepted_idx in accepted_indices:
-            accepted_time = data.time[accepted_idx]
-            if abs(current_time - accepted_time) < min_time_sep:
-                is_close = True
-                break
+        curr_time = peak_times[idx_curr]
 
-        if not is_close:
-            accepted_indices.append(current_idx)
+        # Check against all others
+        for j in range(len(peak_indices)):
+            if i == j or not keep_mask[j]:
+                continue
 
-    # Return sorted by index (time)
-    return np.array(sorted(accepted_indices))
+            other_time = peak_times[j]
+            if abs(curr_time - other_time) < min_time_sep:
+                # Too close. Since we iterate by Amplitude Descending, curr is higher/equal.
+                # Remove other.
+                keep_mask[j] = False
+
+    return peak_indices[keep_mask]
 
 
 def extract_peak_by_index(
@@ -292,67 +425,161 @@ def parse_time_from_filename(filename: str) -> float:
 def find_peaks_t1_t2(
     data: NMRData,
     smoothing: float = 1.6,
-    min_height: float = 5.0,
+    min_height: float = 3.0,
     min_distance: int = 10,
     experiment_type: Optional[ExperimentType] = None,
+    skip_dc_correction: bool = False,
 ) -> Tuple[int, float, float, dict]:
     """
-    Find 3 dominant peaks for T1/T2 analysis.
-
-    Logic:
-    1. Find all peaks > min_height.
-    2. Sort by amplitude descending. Take top 3.
-    3. Sort chronologically: P1 (Start), P2 (Noise), P3 (Fit).
-
-    T1 Logic:
-    - Use P2 for fitting (P3 is ignored).
-    - P1 is always trim/time-zero.
-
-    T2 Logic:
-    - Use P3 for fitting by default.
-    - If P3 is < 0.4s from P1, use P2 for fitting.
-    - P1 is always trim/time-zero.
+    Find 2 dominant peaks for T1/T2 analysis.
 
     Returns:
-        p1_idx: Index of P1 (for trimming/time shift).
+        p1_idx: Index of P1 (Start).
         tau: Time difference between P1 and Fit Peak.
         amp: Amplitude of Fit Peak.
-        peak_info: Dict with indices of P1, P2, P3, fit_idx, and all peaks.
+        peak_info: Dict with indices of P1, fit_idx, and all peaks.
     """
     time = data.time
-    signal = np.abs(data.signal)
+    signal = data.signal
 
-    # Smooth if requested
-    detection_signal = signal
-    if smoothing > 0:
-        detection_signal = gaussian_filter1d(signal, sigma=smoothing)
+    # --- T1 LOGIC (from NMRMINE t1_analysis.py) ---
+    if experiment_type == ExperimentType.T1:
+        # 1. Estimate and Remove DC Offset (if not skipped)
+        if not skip_dc_correction:
+            dc_offset = np.median(signal)
+            signal_corr = signal - dc_offset
+        else:
+            dc_offset = 0.0
+            signal_corr = signal
 
-    # Find peaks with prominence to filter noise
-    peaks, properties = find_peaks(
-        detection_signal, distance=min_distance, height=min_height, prominence=2.0, width=0.1
-    )
+        # 2. Use Absolute signal
+        detection_signal = np.abs(signal_corr)
 
-    # If fewer than 3 peaks, fallback logic
-    if len(peaks) < 3:
-        # Fallback: Just take P1 (Start) and last one as Fit
-        if len(peaks) == 0:
-            # Total failure, return standard defaults
-            return 0, 1.0, 1.0, {"p1_idx": 0, "fit_idx": 0, "all_peaks": peaks}
+        # 3. Dynamic Thresholding
+        max_val = np.max(detection_signal)
+        # "Dynamic Threshold: max(3.0, 0.05 * Max)"
+        dynamic_thresh = max(
+            min_height, 0.05 * max_val
+        )  # Replacing 3.0 with min_height arg for flexibility, likely 5.0 default is safe?
+        # Repo uses hardcoded 3.0. Our default is 5.0.
+        # Let's respect the param `min_height` if it was passed.
 
-        # Sort by amplitude to find "start" peak?
-        # Requirement: "P1 ... is always the highest value"
-        sorted_by_amp = sorted(peaks, key=lambda x: detection_signal[x], reverse=True)
-        p1_idx = sorted_by_amp[0]
-
-        # Taking last available peak as fit peak if we don't have enough
-        fit_idx = (
-            peaks[-1]
-            if peaks[-1] != p1_idx
-            else (peaks[0] if len(peaks) > 0 else p1_idx)
+        # 4. Find Peaks
+        # distance=200 from repo, prominence=threshold
+        peaks, _ = find_peaks(
+            detection_signal,
+            height=dynamic_thresh,
+            distance=200,
+            prominence=dynamic_thresh,
         )
 
+        # Ensure Global Max (index 0 in slice usually, here check if global max is found)
+        # Note: The repo assumes t=0 is global max. We should check if the max signal point is in peaks.
+        # But 'find_peaks' might miss the very first point if it's a boundary?
+        # Repo logic: "if 0 not in peak_indices: peaks = insert(0)" (after slicing).
+        # Here we are not sliced yet?
+        # Let's find global max of detection signal.
+        global_max_idx = np.argmax(detection_signal)
+
+        # If global max is not in peaks, add it
+        if global_max_idx not in peaks:
+            peaks = np.sort(np.append(peaks, global_max_idx))
+
+        # 5. Selection: Peak 0 (First) and Peak -1 (Last)
+        if len(peaks) < 2:
+            # Fallback
+            return 0, 1.0, 1.0, {"p1_idx": 0, "fit_idx": 0, "all_peaks": peaks}
+
+        p1_idx = peaks[0]
+        # T1 Reference: "Pulse" is usually the max/first.
+        # Check if p1_idx is indeed the max? Or at least close?
+        # In T1 inversion recovery, the first pulse is the 180 (or 90 read?), largest magnitude.
+
+        fit_idx = peaks[-1]
+
         tau = time[fit_idx] - time[p1_idx]
-        amp = signal[fit_idx]
+        # Return Magnitude Amplitude (as T1 fits recovery of magnitude)
+        amp = detection_signal[fit_idx]
+
+        return (
+            p1_idx,
+            tau,
+            amp,
+            {
+                "p1_idx": p1_idx,
+                "fit_idx": fit_idx,
+                "all_peaks": peaks,
+                "dc_offset": dc_offset,
+            },
+        )
+
+    # --- T2 LOGIC (from NMRMINE t2_analysis.py) ---
+    else:
+        # Default to T2 behavior
+        detection_signal = np.abs(signal)
+        # T2 repo doesn't explicitly mention DC offset, just "max_idx = argmax... slice... find_peaks"
+
+        max_val = np.max(detection_signal)
+
+        # Threshold: 15% of max
+        # Repo: height = 0.15 * calc_max
+        height_threshold = 0.15 * max_val
+        prominence_val = 0.1 * max_val
+
+        peaks, _ = find_peaks(
+            detection_signal,
+            height=height_threshold,
+            distance=200,
+            prominence=prominence_val,
+        )
+
+        # Ensure global max is included (T2 starts with max)
+        global_max_idx = np.argmax(detection_signal)
+        if global_max_idx not in peaks:
+            peaks = np.sort(np.append(peaks, global_max_idx))
+
+        # Selection Logic
+        # Need P1 (Start) + Echoes.
+        # If < 2 peaks (only max?), fail/fallback.
+        if len(peaks) < 2:
+            return (
+                global_max_idx,
+                1.0,
+                1.0,
+                {
+                    "p1_idx": global_max_idx,
+                    "fit_idx": global_max_idx,
+                    "all_peaks": peaks,
+                },
+            )
+
+        p1_idx = peaks[0]  # Should be global max ideally
+
+        # Remaining peaks (Echoes)
+        # If we have >= 3 peaks (P1, P2, P3...):
+        # Compare P2 (idx 1) and P3 (idx 2)
+        if len(peaks) >= 3:
+            p2_idx = peaks[1]
+            p3_idx = peaks[2]
+
+            amp1 = detection_signal[p2_idx]
+            amp2 = detection_signal[p3_idx]
+
+            # Ratio check
+            ratio = amp2 / amp1 if amp1 != 0 else 0
+
+            if ratio >= 0.6:
+                # Prefer P3
+                fit_idx = p3_idx
+            else:
+                # Prefer P2
+                fit_idx = p2_idx
+        else:
+            # Only 2 peaks: P1 and P2
+            fit_idx = peaks[1]
+
+        tau = time[fit_idx] - time[p1_idx]
+        amp = detection_signal[fit_idx]
 
         return (
             p1_idx,
@@ -361,69 +588,11 @@ def find_peaks_t1_t2(
             {"p1_idx": p1_idx, "fit_idx": fit_idx, "all_peaks": peaks},
         )
 
-    # We have at least 3 peaks.
-    # 1. Sort by amplitude to find top 3
-    # Use amplitude from detection_signal
-    peaks_sorted_by_amp = sorted(peaks, key=lambda x: detection_signal[x], reverse=True)
-    top_3_peaks = peaks_sorted_by_amp[:3]
-
-    if experiment_type == ExperimentType.T2:
-        # T2 Logic: P1 is ALWAYS the highest amplitude peak
-        # Top 3 are already sorted by amp, so top_3_peaks[0] is the max.
-        p1_idx = top_3_peaks[0]
-
-        # P2 and P3 are the remaining two, sorted chronologically
-        remaining_peaks = top_3_peaks[1:]
-        remaining_sorted = sorted(remaining_peaks)
-        p2_idx = remaining_sorted[0]
-        p3_idx = remaining_sorted[1]
-
-        # Fit Logic: Use P3, unless < 0.4s from P1
-        # Calculate time diff
-        delta_t3 = time[p3_idx] - time[p1_idx]
-
-        if delta_t3 < 0.4:
-            fit_idx = p2_idx
-        else:
-            fit_idx = p3_idx
-
-    else:
-        # T1 (and default) Logic:
-        # Sort top 3 chronologically.
-        top_3_chrono = sorted(top_3_peaks)
-
-        p1_idx = top_3_chrono[0]
-        p2_idx = top_3_chrono[1]
-        p3_idx = top_3_chrono[2]
-
-        # T1 Fit Logic: Use P2
-        # (For generic types we default to P2 or P3? Let's assume P3 for generic, but T1 is P2)
-        if experiment_type == ExperimentType.T1:
-            fit_idx = p2_idx
-        else:
-            # Fallback for unknown type? Use P3
-            fit_idx = p3_idx
-
-    # Calculate return values
-    tau = time[fit_idx] - time[p1_idx]
-    # Return RAW amplitude from original signal
-    amp = signal[fit_idx]
-
-    result_info = {
-        "p1_idx": p1_idx,
-        "p2_idx": p2_idx,
-        "p3_idx": p3_idx,
-        "fit_idx": fit_idx,
-        "all_peaks": peaks,
-    }
-
-    return p1_idx, tau, amp, result_info
-
 
 def preprocess_data(
     data: NMRData,
     smoothing: float = 1.6,
-    min_height: float = 6.0,
+    min_height: float = 3.0,
 ) -> Tuple[NMRData, float, float, dict]:
     """
     Preprocess T1/T2 data:
@@ -431,29 +600,82 @@ def preprocess_data(
     2. Shift time so P1 is at 0.
     3. Return shifted data (FULL), extracted tau, and extracted amp.
     """
+    # --- TRIMMING LOGIC (NMRMINE Methodology) ---
+    # We identify the Global Max / Pulse (Start) and slice from there.
+
     time = data.time
-    signal = data.signal  # Keep original signal for processing? Or abs?
-    # find_peaks uses abs(signal).
+    signal = data.signal
 
-    p1_idx, tau, amp, peak_info = find_peaks_t1_t2(
-        data,
-        smoothing=smoothing,
-        min_height=min_height,
-        experiment_type=data.experiment_type,
-    )
+    start_idx = 0
+    dc_offset = 0.0
 
-    # Shift time so P1 is at 0
-    # We DO NOT slice the data anymore, we keep the full trace.
-    # This means times before P1 will be negative.
-    time_shift = time[p1_idx]
-    new_time = time - time_shift
+    if data.experiment_type == ExperimentType.T1:
+        # T1 Logic (t1_analysis.py)
+        # 1. Estimate DC Offset
+        dc_offset = np.median(signal)
+        signal_corr = signal - dc_offset
+        # 2. Use Absolute Signal for Start Detection
+        # "max_idx = np.argmax(abs_signal)"
+        detection_signal = np.abs(signal_corr)
+        start_idx = np.argmax(detection_signal)
 
-    # Create new NMRData with shifted time but full signal
+        # We perform the slicing on the ORIGINAL time/signal (but signal might need DC corr?)
+        # t1_analysis.py computes raw params on 's_slice' which is 'data.signal[mask]' (signed)
+        # BUT it returns 'peak_amps' from 's_abs[selected_indices]'.
+        # So we should probably work with DC-corrected signal?
+        # User snippet for trimming was generic T2.
+        # Let's keep T1 consistent: return corrected signal?
+        # Existing find_peaks_t1_t2 calculates DC offset internally.
+        # If we trim here, we should pass corrected signal?
+        # Actually, let's pass TRIMMED original signal, and let find_peaks handle DC?
+        # But wait, ArgMax depends on DC offset.
+        # If we slice original signal based on ArgMax(Abs(Corr)), that's correct for T1.
+
+    else:
+        # T2 / T2 Multiple Logic (t2_analysis.py / Snippet)
+        # 1. Find Global Max (Time Zero) on SIGNED signal
+        # "max_idx = np.argmax(data.signal)"
+        start_idx = np.argmax(signal)
+
+    # Slice and Shift
+    new_time = time[start_idx:] - time[start_idx]
+    new_signal = signal[start_idx:]
+
+    # Create Processed Data (Trimmed)
     processed_data = NMRData(
         time=new_time,
-        signal=signal,
+        signal=new_signal,
         metadata=data.metadata,
         experiment_type=data.experiment_type,
     )
+
+    # Now find peaks on the TRIMMED data
+    # Note: For T1, we might want to pass the DC offset info or handle it again?
+    # find_peaks_t1_t2 re-calculates DC offset.
+    # If we pass sliced data, median might be different (no pre-pulse baseline).
+    # VALID POINT: T1 DC offset is median of WHOLE signal usually.
+    # If we slice, we lose baseline.
+    # So for T1, we should probably Subtract DC Offset HERE and pass corrected signal in processed_data?
+    # t1_analysis.py: "dc_offset = median(signal); signal = signal - dc; ... s_slice = signal[mask]"
+    # So yes, T1 analysis operates on DC-corrected signal.
+
+    skip_dc = False
+    if data.experiment_type == ExperimentType.T1:
+        # Apply DC correction permanently to processed data for T1
+        processed_data.signal = processed_data.signal - dc_offset
+        skip_dc = True  # Signal is already corrected
+
+    p1_idx, tau, amp, peak_info = find_peaks_t1_t2(
+        processed_data,  # Pass trimmed data
+        smoothing=smoothing,
+        min_height=min_height,
+        experiment_type=data.experiment_type,
+        skip_dc_correction=skip_dc,
+    )
+
+    # Add trimming info to peak_info
+    peak_info["trim_start_idx"] = start_idx
+    if data.experiment_type == ExperimentType.T1:
+        peak_info["dc_offset"] = dc_offset
 
     return processed_data, tau, amp, peak_info
