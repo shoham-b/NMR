@@ -13,7 +13,7 @@ def test_t1_fitting():
     alpha = 1.0
 
     # M(t) = M0 * (1 - 2 * alpha * exp(-t / T1))
-    signal = t1_model(delays, M0, T1, alpha)
+    signal = t1_model(delays, M0, T1)
     # Add noise
     signal += np.random.normal(0, 1.0, size=delays.shape)
 

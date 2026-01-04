@@ -630,50 +630,74 @@ def _run_analysis(
                 f"Total peaks before trim: {len(peak_times)}. Range: {peak_times[0]:.4f} - {peak_times[-1]:.4f} s"
             )
 
-            mask = peak_times > 1.0
-            mask_exclude = ~mask
+            # User Request (Update): "It should find the outer envelope... reverse... should make that happen"
+            # This implies relying on the Reverse Monotonic Filter instead of an arbitrary 1.0s cut.
+            # We will disable the 1.0s trim logic but keep the logging for verification.
+
+            # mask = peak_times > 1.0
+            # mask_exclude = ~mask
 
             # Add trimmed peaks to excluded lists
-            excluded_times = np.concatenate((excluded_times, peak_times[mask_exclude]))
-            excluded_amps = np.concatenate((excluded_amps, peak_amps[mask_exclude]))
+            # excluded_times = np.concatenate((excluded_times, peak_times[mask_exclude]))
+            # excluded_amps = np.concatenate((excluded_amps, peak_amps[mask_exclude]))
 
-            peak_times = peak_times[mask]
-            peak_amps = peak_amps[mask]
+            # peak_times = peak_times[mask]
+            # peak_amps = peak_amps[mask]
+            pass
 
             if len(peak_times) > 0:
                 console.print(
                     f"Remaining peaks after 1.0s trim: {len(peak_times)}. Range: {peak_times[0]:.4f} - {peak_times[-1]:.4f} s"
                 )
-                # User Request: "Still use the argmax for starting at the highest index of after that one second"
-                # Find the index of the maximum amplitude in the REMAINING peaks
-                max_idx_after = np.argmax(peak_amps)
-                max_peak_time = peak_times[max_idx_after]
-                max_peak_amp = peak_amps[max_idx_after]
+                # User Request (Update): Reliance on Reverse Monotonic Filter + Preprocess ArgMax.
+                # Disabling secondary ArgMax logic.
 
-                console.print(
-                    f"Max peak after 1.0s found at {max_peak_time:.4f}s (Amp: {max_peak_amp:.4f}). Trimming pre-max peaks."
-                )
+                # max_idx_after = np.argmax(peak_amps)
+                # max_peak_time = peak_times[max_idx_after]
+                # max_peak_amp = peak_amps[max_idx_after]
+
+                # console.print(
+                #     f"Max peak after 1.0s found at {max_peak_time:.4f}s (Amp: {max_peak_amp:.4f}). Trimming pre-max peaks."
+                # )
 
                 # Add pre-max peaks to excluded
-                if max_idx_after > 0:
-                    excluded_times = np.concatenate(
-                        (excluded_times, peak_times[:max_idx_after])
-                    )
-                    excluded_amps = np.concatenate(
-                        (excluded_amps, peak_amps[:max_idx_after])
-                    )
+                # if max_idx_after > 0:
+                #    excluded_times = np.concatenate((excluded_times, peak_times[:max_idx_after]))
+                #    excluded_amps = np.concatenate((excluded_amps, peak_amps[:max_idx_after]))
 
                 # Slice from that max index onwards
-                peak_times = peak_times[max_idx_after:]
-                peak_amps = peak_amps[max_idx_after:]
+                # peak_times = peak_times[max_idx_after:]
+                # peak_amps = peak_amps[max_idx_after:]
+                # pass
 
                 console.print(
                     f"Final peaks for fitting: {len(peak_times)}. Range: {peak_times[0]:.4f} - {peak_times[-1]:.4f} s"
                 )
             else:
-                console.print(
-                    f"[red]WARNING: No peaks remaining after 1.0s trim![/red]"
-                )
+                console.print(f"[red]WARNING: No peaks remaining after trimming![/red]")
+
+        # User Request: "remove the first peak from every fitting data before fit"
+        # This applies generally to T2 Combined (Echo Train) analysis.
+        if len(peak_times) > 0:
+            # Exclude the first peak (Pulse/First Echo)
+            # Add to excluded
+            excluded_times = np.concatenate((excluded_times, [peak_times[0]]))
+            excluded_amps = np.concatenate((excluded_amps, [peak_amps[0]]))
+
+            # Remove from valid
+            peak_times = peak_times[1:]
+            peak_amps = peak_amps[1:]
+
+            console.print("Removed first peak from fitting data (User Request).")
+
+        if len(peak_times) < 3:
+            console.print(
+                "[red]Not enough peaks for fit after removing first peak.[/red]"
+            )
+            # We might still want to plot what we have? Or return?
+            # If we return [], we get no plot.
+            # Let's try to fit with what we have or skip.
+            return []
 
         # Fit T2 to the peaks
         # Using 0 as initial time? Use relative time?
@@ -707,7 +731,15 @@ def _run_analysis(
                 filepath = save_path / fname
                 console.print(f"Saving plot to {filepath}")
 
-            plot_combined_t2(data, peak_times, peak_amps, result, filepath=filepath)
+            plot_combined_t2(
+                data,
+                peak_times,
+                peak_amps,
+                result,
+                filepath=filepath,
+                excluded_times=excluded_times,
+                excluded_amps=excluded_amps,
+            )
 
         return [
             AnalysisContext(
@@ -1395,7 +1427,7 @@ def plot_analysis_summary(
 
 
 if __name__ == "__main__":
-    for week in ("3.2",):
+    for week in ("4.1",):
         analyze(
             Path(rf"H:\My Drive\Lab C\NMR\week{week}"),
             experiment=None,

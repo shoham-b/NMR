@@ -122,7 +122,10 @@ def extract_echo_train(
     # Effectively "Monotonic Ascending Backward".
 
     peak_indices = peaks_all
-    peak_amps = detection_signal[peaks_all]
+
+    # Use UNSMOOTHED signal for filtering to capture true Outer Envelope
+    unsmoothed_abs = np.abs(signal)
+    peak_amps = unsmoothed_abs[peaks_all]
 
     valid_indices = filter_peaks_monotonic_reverse(peak_indices, peak_amps)
 
@@ -136,10 +139,10 @@ def extract_echo_train(
     excluded_indices = sorted(excluded_indices)
 
     peak_times = time_slice[valid_indices]
-    peak_amps = detection_signal[valid_indices]
+    peak_amps = unsmoothed_abs[valid_indices]
 
     excluded_times = time_slice[excluded_indices]
-    excluded_amps = detection_signal[excluded_indices]
+    excluded_amps = unsmoothed_abs[excluded_indices]
 
     return peak_times, peak_amps, excluded_times, excluded_amps
 

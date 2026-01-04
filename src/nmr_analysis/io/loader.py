@@ -198,6 +198,106 @@ class CSVLoader:
             raise RuntimeError(f"Failed to load CSV file {file_path}: {e}")
 
 
+class OscilloscopeLoader:
+    """Loader for Oscilloscope CSV files."""
+
+    def __init__(self, channel: str = "Channel 1"):
+        self.channel = channel
+
+    def load(self, file_path: Path) -> NMRData:
+        """
+        Load data from an Oscilloscope CSV file.
+
+        Format:
+        - Metadata rows (Key: Value)
+        - Empty row
+        - Header row (Sample No, Time (s), 1 (VOLT), 2 (VOLT))
+        - Data rows
+        """
+        import polars as pl
+        import csv
+
+        file_path = Path(file_path)
+        if not file_path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        metadata = {}
+        skip_rows = 0
+
+        # Parse metadata and determine skip_rows
+        with open(file_path, "r", newline="", encoding="utf-8-sig") as f:
+            reader = csv.reader(f)
+            for i, row in enumerate(reader):
+                if not row:  # Empty row indicates end of metadata
+                    skip_rows = i + 1
+                    break
+
+                # Parse metadata (Key: Value)
+                if len(row) >= 1:
+                    line = row[0]
+                    if ":" in line:
+                        key, value = line.split(":", 1)
+                        metadata[key.strip()] = value.strip()
+                    elif len(row) >= 2:
+                        # Fallback for comma separated key, value
+                        metadata[row[0].strip()] = row[1].strip()
+
+        try:
+            # Load data with polars
+            # The next line after empty row is header.
+            df = pl.read_csv(
+                file_path,
+                skip_rows=skip_rows,
+                has_header=True,
+                infer_schema_length=1000,
+            )
+
+            # Map columns
+            time_col_name = "Time (s)"
+            if time_col_name not in df.columns:
+                # Fallback search for time column
+                possible = [c for c in df.columns if "Time" in c]
+                if possible:
+                    time_col_name = possible[0]
+                else:
+                    raise ValueError(
+                        f"Could not find Time column. Columns: {df.columns}"
+                    )
+
+            time_col = df[time_col_name].cast(pl.Float64, strict=False)
+
+            # Select signal column
+            target_col = "1 (VOLT)"
+            if "2" in self.channel:
+                target_col = "2 (VOLT)"
+
+            if target_col not in df.columns:
+                possible = [
+                    c
+                    for c in df.columns
+                    if f"{'2' if '2' in self.channel else '1'}" in c and "VOLT" in c
+                ]
+                if possible:
+                    target_col = possible[0]
+                else:
+                    raise ValueError(
+                        f"Could not find signal column for {self.channel}. Columns: {df.columns}"
+                    )
+
+            signal_col = df[target_col].cast(pl.Float64, strict=False)
+
+            # Filter valid data
+            mask = time_col.is_not_null() & signal_col.is_not_null()
+
+            time = time_col.filter(mask).to_numpy()
+            signal = signal_col.filter(mask).to_numpy()
+
+            return NMRData(time=time, signal=signal, metadata=metadata)
+
+        except Exception as e:
+            raise RuntimeError(f"Failed to load Oscilloscope CSV file {file_path}: {e}")
+
+
 def get_loader(file_path: Path, channel: str = "Channel 1"):
     """
     Factory function to get the correct loader based on file extension.
@@ -206,6 +306,31 @@ def get_loader(file_path: Path, channel: str = "Channel 1"):
     suffix = file_path.suffix.lower()
 
     if suffix == ".csv":
+        # Sniff content to distinguish between generic CSV and Oscilloscope CSV
+        try:
+            with open(file_path, "r", encoding="utf-8-sig") as f:
+                # Read header lines
+                header_lines = []
+                for _ in range(20):
+                    line = f.readline()
+                    if not line:
+                        break
+                    header_lines.append(line)
+
+                content_chunk = "".join(header_lines)
+
+                # Check for New Oscilloscope format
+                # User specified: Model: Oscilloscope DSOX1204G
+                if (
+                    "Model" in content_chunk
+                    and "Oscilloscope" in content_chunk
+                    and "DSOX1204G" in content_chunk
+                ):
+                    return OscilloscopeLoader(channel=channel)
+
+        except Exception:
+            pass
+
         return CSVLoader(channel=channel)
     elif suffix in (".h5", ".hdf5"):
         return KeysightLoader(channel=channel)
