@@ -682,3 +682,72 @@ def preprocess_data(
         peak_info["dc_offset"] = dc_offset
 
     return processed_data, tau, amp, peak_info
+
+
+def compute_spectrum(data: NMRData) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Compute the Frequency Spectrum (FFT) of the NMR signal.
+    Returns:
+        freqs: Frequency axis (Hz)
+        spectrum: Complex spectrum (centered)
+    """
+    signal = data.signal
+    time = data.time
+
+    # Assuming uniform sampling
+    if len(time) > 1:
+        dt = time[1] - time[0]
+    else:
+        dt = 1.0  # arbitrary default
+
+    n = len(signal)
+    if n == 0:
+        return np.array([]), np.array([])
+
+    # FFT
+    spect = np.fft.fftshift(np.fft.fft(signal))
+    freqs = np.fft.fftshift(np.fft.fftfreq(n, d=dt))
+
+    return freqs, spect
+
+
+def integrate_spectral_peaks(
+    freqs: np.ndarray,
+    spectrum: np.ndarray,
+    peak_centers: list,
+    width_hz: float = 100.0,
+) -> list:
+    """
+    Integrate the Magnitude Spectrum within a window around specified peak centers.
+
+    Args:
+        freqs: Frequency axis (Hz).
+        spectrum: Complex or Magnitude spectrum. (Magnitude will be taken if complex).
+        peak_centers: List of center frequencies (Hz) for the peaks.
+        width_hz: Width of the integration window in Hz.
+
+    Returns:
+        List of integrated areas (one per peak).
+    """
+    mag_spec = np.abs(spectrum)
+    areas = []
+
+    # Assuming uniform df
+    df = freqs[1] - freqs[0]
+
+    for f0 in peak_centers:
+        # Define window indices
+        f_min = f0 - width_hz / 2.0
+        f_max = f0 + width_hz / 2.0
+
+        # Find indices
+        # Use simple boolean mask
+        mask = (freqs >= f_min) & (freqs <= f_max)
+
+        # Integrate: Sum(Amplitude) * df (approx area)
+        # Or just Sum(Amplitude) if we want "Intensity" units consistent with bins.
+        # Ideally Area = Sum(y) * dx
+        area = np.sum(mag_spec[mask]) * df
+        areas.append(area)
+
+    return areas

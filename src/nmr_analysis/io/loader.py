@@ -143,8 +143,8 @@ class CSVLoader:
             df = pl.read_csv(
                 file_path,
                 has_header=False,
-                truncate_ragged_lines=True,
-                infer_schema_length=0,
+                infer_schema_length=None,
+                truncate_ragged_lines=False,
             )
 
             # Metadata extraction (same as before)
@@ -207,12 +207,9 @@ class OscilloscopeLoader:
     def load(self, file_path: Path) -> NMRData:
         """
         Load data from an Oscilloscope CSV file.
-
-        Format:
-        - Metadata rows (Key: Value)
-        - Empty row
-        - Header row (Sample No, Time (s), 1 (VOLT), 2 (VOLT))
-        - Data rows
+        Supports two formats:
+        1. Side-by-Side (DSOX1204G): Metadata in cols 0,1; Data in cols 3,4. Header at row 0.
+        2. Vertical (Legacy): Metadata rows, then blank line, then Header.
         """
         import polars as pl
         import csv
@@ -221,81 +218,178 @@ class OscilloscopeLoader:
         if not file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
 
+        # Detect Format based on first few lines
+        is_side_by_side = False
+        with open(file_path, "r", encoding="utf-8-sig") as f:
+            for _ in range(5):
+                line = f.readline()
+                if not line:
+                    break
+                # Check for characteristic columns of side-by-side
+                if "Time (s)" in line and "(VOLT)" in line:
+                    is_side_by_side = True
+                    break
+
+        if is_side_by_side:
+            return self._load_side_by_side(file_path)
+        else:
+            return self._load_vertical(file_path)
+
+    def _load_side_by_side(self, file_path: Path) -> NMRData:
+        import polars as pl
+        import csv
+
+        # Load with Polars (Header at row 0 or deeper)
+        try:
+            # Find header row first
+            skip_rows = 0
+            with open(file_path, "r", encoding="utf-8-sig") as f:
+                for i, line in enumerate(f):
+                    if "Time" in line and "(s)" in line and "(VOLT)" in line:
+                        skip_rows = i
+                        break
+
+            df = pl.read_csv(
+                file_path,
+                has_header=True,
+                skip_rows=skip_rows,
+                infer_schema_length=1000,
+                truncate_ragged_lines=True,
+            )
+
+            # Metadata (reload to be safe from top)
+            metadata = {}
+            with open(file_path, "r", newline="", encoding="utf-8-sig") as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                for row in reader:
+                    if len(row) >= 2:
+                        key = row[0].strip()
+                        val = row[1].strip()
+                        if key:
+                            if key.endswith(":"):
+                                key = key[:-1]
+                            metadata[key] = val
+
+            # Data
+            # Find Time Column
+            time_cols = [c for c in df.columns if "Time" in c and "(s)" in c]
+            if not time_cols:
+                time_cols = [c for c in df.columns if "Time" in c]
+            if not time_cols:
+                raise ValueError("Time column not found")
+            time_col_name = time_cols[0]
+
+            # Find Signal Column
+            # Target Channel
+            target_ch = "1"
+            if "2" in self.channel:
+                target_ch = "2"
+
+            # Look for explicit "{ch} (VOLT)"
+            sig_cols = [c for c in df.columns if f"{target_ch} (VOLT)" in c]
+
+            if not sig_cols:
+                # If specifically looking for Ch 2 and not found, maybe valid error.
+                # BUT if user says "Channel 2" but file only has Ch 1, and user implies "just load data",
+                # we might need to fallback?
+                # User default in commands.py is "Channel 2". If file is "Channel 1" only, that's a problem.
+                # Let's try to fallback to ANY "VOLT" column if specific one missing?
+                # No, that's dangerous. Better to fail or warn.
+                # However, for robustness, if only 1 VOLT column exists, maybe use it?
+                volt_cols = [c for c in df.columns if "(VOLT)" in c]
+                if len(volt_cols) == 1:
+                    sig_cols = volt_cols
+                else:
+                    raise ValueError(
+                        f"Signal column for {self.channel} not found in {df.columns}"
+                    )
+
+            sig_col_name = sig_cols[0]
+
+            time = df[time_col_name].cast(pl.Float64, strict=False)
+            signal = df[sig_col_name].cast(pl.Float64, strict=False)
+
+            mask = time.is_not_null() & signal.is_not_null()
+            return NMRData(
+                time=time.filter(mask).to_numpy(),
+                signal=signal.filter(mask).to_numpy(),
+                metadata=metadata,
+            )
+
+        except Exception as e:
+            raise RuntimeError(f"Side-by-side load failed: {e}")
+
+    def _load_vertical(self, file_path: Path) -> NMRData:
+        import polars as pl
+        import csv
+
         metadata = {}
         skip_rows = 0
-
-        # Parse metadata and determine skip_rows
         with open(file_path, "r", newline="", encoding="utf-8-sig") as f:
             reader = csv.reader(f)
             for i, row in enumerate(reader):
-                if not row:  # Empty row indicates end of metadata
+                if not row:
                     skip_rows = i + 1
                     break
-
-                # Parse metadata (Key: Value)
                 if len(row) >= 1:
                     line = row[0]
                     if ":" in line:
-                        key, value = line.split(":", 1)
-                        metadata[key.strip()] = value.strip()
+                        k, v = line.split(":", 1)
+                        metadata[k.strip()] = v.strip()
                     elif len(row) >= 2:
-                        # Fallback for comma separated key, value
                         metadata[row[0].strip()] = row[1].strip()
 
         try:
-            # Load data with polars
-            # The next line after empty row is header.
             df = pl.read_csv(
                 file_path,
                 skip_rows=skip_rows,
                 has_header=True,
                 infer_schema_length=1000,
+                truncate_ragged_lines=True,
             )
 
-            # Map columns
-            time_col_name = "Time (s)"
-            if time_col_name not in df.columns:
-                # Fallback search for time column
-                possible = [c for c in df.columns if "Time" in c]
-                if possible:
-                    time_col_name = possible[0]
-                else:
-                    raise ValueError(
-                        f"Could not find Time column. Columns: {df.columns}"
-                    )
+            # Map columns logic (reuse or simplify)
+            time_cols = [c for c in df.columns if "Time" in c]
+            if not time_cols:
+                raise ValueError("Time column not found")
+            time_col_name = time_cols[0]
 
-            time_col = df[time_col_name].cast(pl.Float64, strict=False)
-
-            # Select signal column
-            target_col = "1 (VOLT)"
+            target_ch = "1"
             if "2" in self.channel:
-                target_col = "2 (VOLT)"
+                target_ch = "2"
 
-            if target_col not in df.columns:
-                possible = [
-                    c
-                    for c in df.columns
-                    if f"{'2' if '2' in self.channel else '1'}" in c and "VOLT" in c
-                ]
-                if possible:
-                    target_col = possible[0]
+            # Check for "1 (VOLT)" or just "1" or "Channel 1"
+            sig_cols = [c for c in df.columns if f"{target_ch} (VOLT)" in c]
+            if not sig_cols:
+                sig_cols = [c for c in df.columns if c.strip() == target_ch]
+
+            if not sig_cols:
+                # Fallback
+                volt_cols = [c for c in df.columns if "(VOLT)" in c]
+                if len(volt_cols) == 1:
+                    print(
+                        f"WARNING: Requested {self.channel} ({target_ch}) not found. using {volt_cols[0]}"
+                    )
+                    sig_cols = volt_cols
                 else:
                     raise ValueError(
-                        f"Could not find signal column for {self.channel}. Columns: {df.columns}"
+                        f"Signal column for {self.channel} not found in {df.columns}"
                     )
 
-            signal_col = df[target_col].cast(pl.Float64, strict=False)
+            sig_col_name = sig_cols[0]
 
-            # Filter valid data
-            mask = time_col.is_not_null() & signal_col.is_not_null()
-
-            time = time_col.filter(mask).to_numpy()
-            signal = signal_col.filter(mask).to_numpy()
-
-            return NMRData(time=time, signal=signal, metadata=metadata)
+            time = df[time_col_name].cast(pl.Float64, strict=False)
+            signal = df[sig_col_name].cast(pl.Float64, strict=False)
+            mask = time.is_not_null() & signal.is_not_null()
+            return NMRData(
+                time=time.filter(mask).to_numpy(),
+                signal=signal.filter(mask).to_numpy(),
+                metadata=metadata,
+            )
 
         except Exception as e:
-            raise RuntimeError(f"Failed to load Oscilloscope CSV file {file_path}: {e}")
+            raise RuntimeError(f"Vertical load failed: {e}")
 
 
 def get_loader(file_path: Path, channel: str = "Channel 1"):
@@ -321,11 +415,8 @@ def get_loader(file_path: Path, channel: str = "Channel 1"):
 
                 # Check for New Oscilloscope format
                 # User specified: Model: Oscilloscope DSOX1204G
-                if (
-                    "Model" in content_chunk
-                    and "Oscilloscope" in content_chunk
-                    and "DSOX1204G" in content_chunk
-                ):
+                # Relaxed check: Just Model and DSOX1204G
+                if "Model" in content_chunk and "DSOX1204G" in content_chunk:
                     return OscilloscopeLoader(channel=channel)
 
         except Exception:

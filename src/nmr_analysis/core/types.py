@@ -11,6 +11,7 @@ class ExperimentType(str, Enum):
     T2_STAR = "t2_star"
     T2_COMBINED = "t2_combined"
     DIFFUSION = "diffusion"
+    SPECTRUM = "spectrum"
 
 
 @dataclass

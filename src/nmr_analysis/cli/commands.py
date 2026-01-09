@@ -5,21 +5,22 @@ import matplotlib.cm as cm
 import matplotlib.pyplot as plt
 import numpy as np
 import typer
-from rich.console import Console
-from rich.progress import Progress
-from rich.table import Table
-from scipy.ndimage import gaussian_filter1d
-
 from nmr_analysis.analysis.fitting import Fitter
 from nmr_analysis.analysis.models import t2_decay_model
 from nmr_analysis.analysis.processing import (
     extract_echo_train,
     preprocess_data,
+    compute_spectrum,
 )
+from nmr_analysis.analysis.hybrid import analyze_spectral_series, HybridAnalysisResult
 from nmr_analysis.core.types import ExperimentType, AnalysisResult, NMRData
 from nmr_analysis.io.loader import get_loader
 from nmr_analysis.io.reporting import save_summary_csv
 from nmr_analysis.visualization.interactive import generate_dashboard, AnalysisContext
+from rich.console import Console
+from rich.progress import Progress
+from rich.table import Table
+from scipy.ndimage import gaussian_filter1d
 
 ANALYSIS_SMOOTHING = 2.6
 
@@ -101,8 +102,11 @@ def analyze(
             # Use lower case for matching but preserve original name for output/logging
             name_lower = item.name.lower()
 
-            if name_lower in ALIAS_MAP:
-                exp_type = ALIAS_MAP[name_lower]
+            if name_lower in ALIAS_MAP or name_lower.endswith("nol"):
+                if name_lower.endswith("nol"):
+                    exp_type = ExperimentType.SPECTRUM
+                else:
+                    exp_type = ALIAS_MAP[name_lower]
 
                 # SPECIAL HANDLING FOR WATER DATASET
                 # Logic refined:
@@ -178,7 +182,9 @@ def analyze(
                             channel,
                             plot,
                             save_path=target_out,
-                            prefix=target_path.parent.name if flat else "",
+                            prefix=f"{target_path.parent.name}_{target_path.name}"
+                            if flat
+                            else "",
                         )
                         if ctxs:
                             collected_contexts.extend(ctxs)
@@ -390,6 +396,156 @@ def _run_analysis(
                 console.print(f"[red]Failed to analyze {target_file.name}: {e}[/red]")
 
         return results
+
+        return results
+
+    elif experiment == ExperimentType.SPECTRUM:
+        # Spectrum Analysis
+        target_files = []
+        if path.is_dir():
+            # Recursive search for all valid files
+            raw_files = list(path.rglob("*"))
+            target_files = [
+                f for f in raw_files if f.suffix.lower() in [".h5", ".hdf5", ".csv"]
+            ]
+        else:
+            target_files = [path]
+
+        console.print(f"Found {len(target_files)} files for Spectral analysis.")
+
+        if len(target_files) > 1:
+            # Hybrid Series Analysis for multiple files
+            console.print(
+                "[bold green]Running Hybrid Spectral Series Analysis...[/bold green]"
+            )
+            data_list = []
+            names = []
+            for tf in target_files:
+                try:
+                    loader = get_loader(tf, channel=channel)
+                    d = loader.load(tf)
+                    data_list.append(d)
+                    names.append(tf.name)
+                except Exception as e:
+                    console.print(f"[yellow]Skipping {tf.name}: {e}[/yellow]")
+
+            if not data_list:
+                console.print("[red]No valid data loaded for hybrid analysis.[/red]")
+                return []
+
+            hybrid_res = analyze_spectral_series(data_list, names)
+
+            # Print Summary
+            console.print(
+                f"[bold]Hybrid Analysis Results: {hybrid_res.dataset_name}[/bold]"
+            )
+            table = Table(title="Spectral T2 Results")
+            table.add_column("Peak Freq (Hz)", justify="right")
+            table.add_column("T2 (s)", justify="right")
+            table.add_column("M0", justify="right")
+            table.add_column("R2 Score", justify="right")
+
+            for i, res in enumerate(hybrid_res.t2_results):
+                f0 = hybrid_res.peak_centers[i]
+                t2 = res.get("T2", 0)
+                m0 = res.get("M0", 0)
+                r2 = res.get("r_squared", 0)
+                table.add_row(f"{f0:.2f}", f"{t2:.4f}", f"{m0:.2e}", f"{r2:.4f}")
+
+            console.print(table)
+
+            if plot:
+                out_dir = save_path if save_path else target_files[0].parent
+                prefix_str = f"{prefix}_" if prefix else ""
+                # Use dataset name (clean) for plotting
+                plot_hybrid_result(
+                    hybrid_res,
+                    out_dir,
+                    prefix=f"{prefix_str}hybrid_{hybrid_res.dataset_name}",
+                )
+
+            return []
+
+        else:
+            # Standard Single File Analysis
+            # User Request: "T2* is in the time domain as always was"
+            # So even if Type=SPECTRUM, for single file, do Time Domain T2* Fit but Show Spectrum.
+            for target_file in target_files:
+                try:
+                    console.print(f"Loading {target_file.name}...")
+                    loader = get_loader(target_file, channel=channel)
+                    data = loader.load(target_file)
+
+                    # 1. Compute Spectrum for visualization
+                    console.print("Computing Spectrum...")
+                    freqs, spect = compute_spectrum(data)
+
+                    # 2. Fit Time Domain T2* (Standard)
+                    console.print("Fitting T2* (Time Domain)...")
+                    result = Fitter.fit_t2_star(data)
+
+                    # Add dataset name
+                    if len(target_files) > 1:
+                        result.dataset_name = (
+                            f"{result.dataset_name} ({target_file.stem})"
+                        )
+
+                    print_result(result)
+
+                    if plot:
+                        # Save Time Domain Fit Plot
+                        if save_path:
+                            out_dir = (
+                                save_path if save_path.is_dir() else save_path.parent
+                            )
+                        else:
+                            out_dir = target_file.parent
+
+                        fname = (
+                            f"{prefix}_{target_file.stem}_fit.png"
+                            if prefix
+                            else f"{target_file.stem}_fit.png"
+                        )
+                        filepath = out_dir / fname
+                        console.print(f"Saving T2* fit plot to {filepath}")
+
+                        plot_result(
+                            data.time,
+                            np.abs(data.signal),
+                            result,
+                            f"Time ({data.metadata.get('time_unit', 's')})",
+                            "Signal (Magnitude)",
+                            filepath=filepath,
+                        )
+
+                        # Also Save Spectrum Plot (without Fit)
+                        # Also Save Spectrum Plot (without Fit)
+                        # We used out_dir above, can reuse or re-derive
+                        fname_spec = (
+                            f"{prefix}_{target_file.stem}_spectrum.png"
+                            if prefix
+                            else f"{target_file.stem}_spectrum.png"
+                        )
+                        filepath_spec = out_dir / fname_spec
+                        console.print(f"Saving Spectrum plot to {filepath_spec}")
+
+                        # Simple spectrum plot
+                        fig, ax = plt.subplots(figsize=(10, 6))
+                        ax.plot(freqs, np.abs(spect), color="black")
+                        ax.set_title(f"Spectrum: {target_file.name}")
+                        ax.set_xlabel("Frequency (Hz)")
+                        ax.set_ylabel("Magnitude")
+                        ax.grid(True, alpha=0.3)
+
+                        plt.savefig(filepath_spec)
+                        plt.close()
+
+                    results.append(AnalysisContext(data=data, result=result))
+
+                except Exception as e:
+                    console.print(
+                        f"[red]Failed to analyze {target_file.name}: {e}[/red]"
+                    )
 
         return results
 
@@ -775,13 +931,13 @@ def _run_analysis(
             for f in files:
                 try:
                     loader = get_loader(f, channel=channel)
-                    data = loader.load(f)
-                    data.experiment_type = experiment
+                    data_full = loader.load(f)
+                    data_full.experiment_type = experiment
 
                     # Preprocess: Find peak, slice, and shift time to 0
                     # Returns processed_data, tau, amp, peak_info
-                    data, original_tau, amp, peak_info = preprocess_data(
-                        data,
+                    processed_data, original_tau, amp, peak_info = preprocess_data(
+                        data_full,
                         smoothing=ANALYSIS_SMOOTHING,
                     )
 
@@ -801,44 +957,20 @@ def _run_analysis(
                         label = f.stem
                         sort_val = tau
 
-                    data.metadata["trace_label"] = label
+                    data_full.metadata["trace_label"] = label
+                    processed_data.metadata["trace_label"] = label
 
                     delays.append(original_tau)
                     amplitudes.append(amp)
 
-                    # Store peak_info in the tuple
-                    # Tuple structure: (data, peak_time(0.0), amp, tau, peak_info, sort_val)
-                    # Note: We pass 0.0 as peak time because data is shifted to start at P1 (0.0)
-                    # But peak_info indices refer to ORIGINAL data usually?
-                    # Wait, preprocess_data returns NEW data sliced.
-                    # P3 index relative to new data?
-                    # preprocess_data returns:
-                    # tau = t_fit - t_start (Difference)
-                    # new_time starts at 0.
-                    # t_fit in new time is exactly `tau`.
-                    # So P3 is at `tau` in the new time axis.
-                    # P1 is at 0.0.
-                    # We can visualize P3 at `tau`.
+                    # Store full raw data for visualization (User Request)
+                    # We pass data_full (untouched) but we also need peak_info to know where peaks are relative to it.
+                    # peak_info contains 'trim_start_idx' which connects processed to full.
+                    # Note: We rely on trim_start_idx to adjust plotting markers.
 
-                    # However, raw_traces usually stores processed data.
-                    # So we should plot markers relative to this processed data.
-                    # P1 is at 0.
-                    # P3 is at tau.
-                    # P2? We don't have P2 relative time easily unless we calc it.
-                    # peak_info has INDICES into ORIGINAL data.
-                    # We need indices into NEW data or Times.
-
-                    # Let's trust peak_info has indices.
-                    # p1_idx is start.
-                    # p2_idx is original index.
-                    # p3_idx is original index.
-                    # New index = Old - p1_idx.
-                    # So P2_new_idx = p2_idx - p1_idx (if > p1_idx).
-                    # P3_new_idx = p3_idx - p1_idx.
-
-                    # We'll calculate relative times for plotting.
-
-                    raw_traces.append((data, 0.0, amp, tau, peak_info, sort_val))
+                    raw_traces.append(
+                        (processed_data, data_full, 0.0, amp, tau, peak_info, sort_val)
+                    )
                 except Exception as e:
                     console.print(f"[yellow]Skipping {f.name}: {e}[/yellow]")
 
@@ -854,8 +986,9 @@ def _run_analysis(
         delays = delays[sorted_indices]
         amplitudes = amplitudes[sorted_indices]
 
-        # raw_traces: (data, t_peak_dummy, amp, tau, peak_info, sort_val)
-        raw_traces.sort(key=lambda x: x[5])
+        # raw_traces: (processed, full, t_peak, amp, tau, peak_info, sort_val)
+        # Sort by sort_val (index 6)
+        raw_traces.sort(key=lambda x: x[6])
 
         console.print("Fitting data...")
         if experiment == ExperimentType.T1:
@@ -918,6 +1051,179 @@ def _run_analysis(
         ]
 
 
+def plot_spectrum_fit(freqs, mag_data, result, filepath=None):
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(freqs, mag_data, label="Data (Magnitude)", color="black", alpha=0.7)
+    if len(result.fit_curve) > 0:
+        ax.plot(
+            freqs,
+            result.fit_curve,
+            label="Fit (Mag Lorentzian)",
+            color="red",
+            linestyle="--",
+        )
+
+    # Mark peaks
+    if "peaks" in result.params:
+        for p in result.params["peaks"]:
+            f0 = p["f0"]
+            ax.axvline(f0, color="green", linestyle=":", alpha=0.5)
+
+    ax.set_xlabel("Frequency (Hz)")
+    ax.set_ylabel("Magnitude")
+    ax.set_title(f"{result.dataset_name}")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    if filepath:
+        plt.savefig(filepath)
+        plt.close()
+    else:
+        plt.show()
+
+
+def plot_hybrid_result(result: HybridAnalysisResult, out_dir: Path, prefix: str = ""):
+    """
+    Generate plots for Hybrid Analysis:
+    1. Stacked Overview: Time Traces (Left) + Frequency Spectra (Right).
+    2. T2 Decay Fits: Linear (Left) + Log (Right) of Area vs Tau.
+    """
+    import matplotlib.cm as cm
+
+    # --- 1. Stacked Overview (Time + Freq) ---
+    fig_stack, (ax_time, ax_freq) = plt.subplots(1, 2, figsize=(16, 8))
+    cmap = cm.viridis
+
+    # Left: Time Traces
+    time_list = result.time_stack
+    n_files = len(time_list)
+
+    valid_sigs = [np.abs(d.signal) for d in time_list if len(d.signal) > 0]
+    max_sig_t = np.max([np.max(s) for s in valid_sigs]) if valid_sigs else 1.0
+    offset_step_t = max_sig_t * 0.5
+
+    for i, data in enumerate(time_list):
+        sig = np.abs(data.signal)
+        t = data.time
+        color = cmap(i / n_files)
+        ax_time.plot(t, sig + i * offset_step_t, color=color, alpha=0.8)
+
+    ax_time.set_xlabel(f"Time ({time_list[0].metadata.get('time_unit', 's')})")
+    ax_time.set_ylabel("Signal Amplitude (Stacked)")
+    ax_time.set_title(f"Stacked Time Traces")
+    ax_time.grid(True, alpha=0.3)
+
+    # Right: Frequency Spectra
+    freqs, spectra_list = result.spectra_stack
+    valid_specs = [s for s in spectra_list if len(s) > 0]
+    max_amp_f = np.max([np.max(s) for s in valid_specs]) if valid_specs else 1.0
+    offset_step_f = max_amp_f * 0.2
+
+    for i, spect in enumerate(spectra_list):
+        mag = np.abs(spect)
+        color = cmap(i / n_files)
+        ax_freq.plot(freqs, mag + i * offset_step_f, color=color, alpha=0.8)
+
+    ax_freq.set_xlabel("Frequency (Hz)")
+    ax_freq.set_ylabel("Magnitude (Stacked)")
+    ax_freq.set_title(f"Stacked Spectra")
+    ax_freq.grid(True, alpha=0.3)
+
+    fig_stack.suptitle(f"Hybrid Analysis Overview: {result.dataset_name}", fontsize=14)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+
+    fname_stack = f"{prefix}_stacked_overview.png"
+    plt.savefig(out_dir / fname_stack)
+    plt.close(fig_stack)
+    console.print(f"Saved {fname_stack}")
+
+    # --- 2. T2 Decay Fits ---
+    n_peaks = len(result.peak_centers)
+
+    fig_fit, axes = plt.subplots(n_peaks, 2, figsize=(16, 6 * n_peaks), squeeze=False)
+    taus = result.tau_values
+
+    for k in range(n_peaks):
+        areas = result.integrated_areas[k, :]  # Integrated Frequency Space Area
+        fit_res = result.t2_results[k]
+        f0 = result.peak_centers[k]
+
+        # Left: Linear
+        ax_lin = axes[k, 0]
+        ax_lin.scatter(
+            taus, areas, label="Integrated Area", color="blue", s=50, zorder=3
+        )
+
+        t_smooth = np.linspace(min(taus), max(taus), 200)
+        if fit_res.get("T2", 0) > 0:
+            y_fit = t2_decay_model(
+                t_smooth, fit_res["M0"], fit_res["T2"], fit_res["offset"]
+            )
+            ax_lin.plot(t_smooth, y_fit, "r--", label="Fit", linewidth=2, zorder=2)
+
+        ax_lin.set_xlabel("Delay $\\tau$ (s)")
+        ax_lin.set_ylabel("Integrated Area (Frequency Domain)")
+        ax_lin.set_title(f"Peak @ {f0:.1f} Hz (Linear)")
+        ax_lin.grid(True, alpha=0.5)
+        ax_lin.legend(loc="best")
+
+        # Right: Log
+        ax_log = axes[k, 1]
+        valid_mask = areas > 0
+        ax_log.scatter(
+            taus[valid_mask],
+            areas[valid_mask],
+            label="Integrated Area",
+            color="blue",
+            s=50,
+            zorder=3,
+        )
+
+        if fit_res.get("T2", 0) > 0:
+            y_fit_log = t2_decay_model(
+                t_smooth, fit_res["M0"], fit_res["T2"], fit_res["offset"]
+            )
+            # Filter non-positive for log plot
+            valid_y = y_fit_log > 0
+            ax_log.plot(
+                t_smooth[valid_y],
+                y_fit_log[valid_y],
+                "r--",
+                label="Fit",
+                linewidth=2,
+                zorder=2,
+            )
+
+            # Add T2 text
+            val = fit_res["T2"]
+            r2 = fit_res.get("r_squared", 0)
+            text_str = rf"$T_2 = {val:.4f}$ s" + "\n" + rf"$R^2 = {r2:.4f}$"
+            ax_log.text(
+                0.95,
+                0.95,
+                text_str,
+                transform=ax_log.transAxes,
+                fontsize=12,
+                verticalalignment="top",
+                horizontalalignment="right",
+                bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
+            )
+
+        ax_log.set_yscale("log")
+        ax_log.set_xlabel("Delay $\\tau$ (s)")
+        ax_log.set_ylabel("Integrated Area (Log)")
+        ax_log.set_title(f"Peak @ {f0:.1f} Hz (Log)")
+        ax_log.grid(True, which="both", alpha=0.5)
+
+    fig_fit.suptitle(f"T2 Decay Analysis: {result.dataset_name}", fontsize=16)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+
+    fname_fit = f"{prefix}_t2_decay.png"
+    plt.savefig(out_dir / fname_fit)
+    plt.close(fig_fit)
+    console.print(f"Saved {fname_fit}")
+
+
 def print_result(result: AnalysisResult):
     table = Table(title=f"Results: {result.dataset_name}")
     table.add_column("Parameter", style="cyan")
@@ -933,10 +1239,29 @@ def print_result(result: AnalysisResult):
 
     else:
         for k, v in result.params.items():
+            if k == "peaks" and isinstance(v, list):
+                # Handle Peak List
+                table.add_row("Peaks Found", f"{len(v)}")
+                console.print(table)
+                # Create separate table for peaks
+                peak_table = Table(title="Detected Peaks")
+                peak_table.add_column("Freq (Hz)", justify="right")
+                peak_table.add_column("T2* (s)", justify="right")
+                peak_table.add_column("Amp", justify="right")
+
+                for p in v:
+                    peak_table.add_row(
+                        f"{p['f0']:.2f}", f"{p['t2_star']:.4f}", f"{p['amplitude']:.2e}"
+                    )
+                console.print(peak_table)
+                return
+
             if k in ("T2", "T1"):
                 table.add_row(k, f"{v:.4f}")
-            else:
+            elif isinstance(v, (int, float)):
                 table.add_row(k, f"{v:.4e}")
+            else:
+                table.add_row(k, str(v))
         table.add_row("R-Squared", f"{result.r_squared:.4f}")
 
     console.print(table)
@@ -1194,20 +1519,21 @@ def plot_combined_t2(
 
 
 def plot_stacked_traces(
-    raw_traces: List[Tuple[NMRData, float, float, float, dict, float]],
+    raw_traces: List[Tuple[NMRData, NMRData, float, float, float, dict, float]],
     filepath: Optional[Path] = None,
     smoothing: float = 1.0,
 ):
     """
-    Plot raw traces (left column) and smoothed traces (right column), stacked vertically.
+    Plot processed traces (left) and full raw traces (right), stacked vertically.
     """
     num_traces = len(raw_traces)
     if num_traces == 0:
         return
 
     fig_height = max(6, num_traces * 3)
-    # Create 2 columns: Raw (left) and Smoothed (right)
-    fig, axes = plt.subplots(num_traces, 2, figsize=(16, fig_height), sharex=True)
+    # Create 2 columns: Processed (left) and Raw (right)
+    # Different x-axes
+    fig, axes = plt.subplots(num_traces, 2, figsize=(16, fig_height))
 
     # Handle single trace case
     if num_traces == 1:
@@ -1216,33 +1542,35 @@ def plot_stacked_traces(
     cmap = cm.viridis
     norm = plt.Normalize(0, num_traces - 1 if num_traces > 1 else 1)
 
-    for i, (data, t_peak, amp, tau, peak_info, *_) in enumerate(raw_traces):
-        ax_raw = axes[i, 0]  # Left column: Raw
-        ax_smooth = axes[i, 1]  # Right column: Smoothed
+    for i, (processed_data, data_full, t_peak, amp, tau, peak_info, *_) in enumerate(
+        raw_traces
+    ):
+        ax_proc = axes[i, 0]  # Left column: Processed
+        ax_raw = axes[i, 1]  # Right column: Full Raw
         color = cmap(norm(i))
-        signal = np.abs(data.signal)
-        smoothed = gaussian_filter1d(signal, sigma=smoothing)
 
-        # --- LEFT: Raw Data ---
-        ax_raw.plot(data.time, signal, color=color, alpha=0.8, linewidth=1.2)
-        ax_raw.set_ylabel("Amplitude")
-        ax_raw.grid(True, alpha=0.3)
+        proc_signal = np.abs(processed_data.signal)
+        full_signal = np.abs(data_full.signal)
 
-        if "trace_label" in data.metadata:
-            ax_raw.set_title(f"Raw: {data.metadata['trace_label']}")
+        # --- LEFT: Processed Data with Peaks ---
+        ax_proc.plot(
+            processed_data.time, proc_signal, color=color, alpha=0.8, linewidth=1.2
+        )
+        ax_proc.set_ylabel("Amplitude")
+        ax_proc.grid(True, alpha=0.3)
+
+        if "trace_label" in processed_data.metadata:
+            ax_proc.set_title(f"Processed: {processed_data.metadata['trace_label']}")
         else:
-            unit = data.metadata.get("time_unit", "s")
-            ax_raw.set_title(f"Raw Trace {i + 1}: τ={tau:.2e} {unit}")
+            unit = processed_data.metadata.get("time_unit", "s")
+            ax_proc.set_title(f"Processed Trace {i + 1}: τ={tau:.2e} {unit}")
 
-        # --- RIGHT: Smoothed Data with Peak Markers ---
-        ax_smooth.plot(data.time, smoothed, color=color, alpha=0.9, linewidth=1.5)
-
-        # Helper to plot peak markers
-        def mark_peak(ax, idx_offset, color_marker, marker, label):
-            if idx_offset >= 0 and idx_offset < len(data.time):
-                ax.scatter(
-                    [data.time[idx_offset]],
-                    [smoothed[idx_offset]],
+        # Mark peaks on Processed (Relative indices)
+        def mark_peak_proc(idx, color_marker, marker, label):
+            if idx >= 0 and idx < len(processed_data.time):
+                ax_proc.scatter(
+                    [processed_data.time[idx]],
+                    [proc_signal[idx]],
                     color=color_marker,
                     marker=marker,
                     s=100,
@@ -1251,32 +1579,53 @@ def plot_stacked_traces(
                     edgecolors="black",
                 )
 
-        p1_idx_orig = peak_info.get("p1_idx", 0)
+        p1_idx = peak_info.get("p1_idx", 0)
+        mark_peak_proc(p1_idx, "cyan", "o", "P1 (Start)")
 
-        # P1 (Start) - Cyan Circle
-        mark_peak(ax_smooth, 0, "cyan", "o", "P1 (Start)")
+        p2_idx = peak_info.get("p2_idx", -1)
+        if p2_idx != -1 and p2_idx >= p1_idx:
+            mark_peak_proc(p2_idx, "red", "X", "P2 (Ignored)")
 
-        # P2 (Noise) - Red X
-        p2_idx_orig = peak_info.get("p2_idx", -1)
-        if p2_idx_orig != -1 and p2_idx_orig >= p1_idx_orig:
-            mark_peak(ax_smooth, p2_idx_orig - p1_idx_orig, "red", "X", "P2 (Ignored)")
+        fit_idx = peak_info.get("fit_idx", peak_info.get("p3_idx", 0))
+        if fit_idx >= p1_idx:
+            mark_peak_proc(fit_idx, "lime", "*", "Fit Peak")
 
-        # Fit Peak - Green Star
-        fit_idx_orig = peak_info.get("fit_idx", peak_info.get("p3_idx", 0))
-        if fit_idx_orig >= p1_idx_orig:
-            mark_peak(ax_smooth, fit_idx_orig - p1_idx_orig, "lime", "*", "Fit Peak")
+        ax_proc.legend(loc="best", fontsize=8)
 
-        ax_smooth.set_ylabel("Amplitude")
-        ax_smooth.grid(True, alpha=0.3)
-        ax_smooth.legend(loc="best", fontsize=8)
+        # --- RIGHT: Full Raw Data ---
+        ax_raw.plot(data_full.time, full_signal, color=color, alpha=0.9, linewidth=1.5)
 
-        if "trace_label" in data.metadata:
-            ax_smooth.set_title(
-                f"Smoothed (σ={smoothing}): {data.metadata['trace_label']}"
-            )
+        # Mark peaks on Full Raw (Absolute indices)
+        trim_offset = peak_info.get("trim_start_idx", 0)
+
+        # Helper to plot peak markers on Raw
+        def mark_peak_raw(idx, color_marker, marker, label):
+            if idx >= 0 and idx < len(data_full.time):
+                ax_raw.scatter(
+                    [data_full.time[idx]],
+                    [full_signal[idx]],
+                    color=color_marker,
+                    marker=marker,
+                    s=100,
+                    zorder=6,
+                    label=label,
+                    edgecolors="black",
+                )
+
+        mark_peak_raw(trim_offset + p1_idx, "cyan", "o", "P1")
+        if p2_idx != -1 and p2_idx >= p1_idx:
+            mark_peak_raw(trim_offset + p2_idx, "red", "X", "P2")
+        if fit_idx >= p1_idx:
+            mark_peak_raw(trim_offset + fit_idx, "lime", "*", "Fit")
+
+        ax_raw.set_ylabel("Amplitude")
+        ax_raw.grid(True, alpha=0.3)
+
+        if "trace_label" in data_full.metadata:
+            ax_raw.set_title(f"Full Raw: {data_full.metadata['trace_label']}")
         else:
-            unit = data.metadata.get("time_unit", "s")
-            ax_smooth.set_title(f"Smoothed Trace {i + 1}: τ={tau:.2e} {unit}")
+            unit = data_full.metadata.get("time_unit", "s")
+            ax_raw.set_title(f"Full Raw Trace {i + 1}")
 
     # Set x-labels only on bottom row
     unit = raw_traces[0][0].metadata.get("time_unit", "s")
@@ -1327,11 +1676,11 @@ def plot_analysis_summary(
         )
 
         # Highlight 3 Peaks (P1, P2, P3)
-        def mark_peak(idx_offset, color, marker, label):
-            if idx_offset >= 0 and idx_offset < len(data.time):
+        def mark_peak(idx, color, marker, label):
+            if idx >= 0 and idx < len(data.time):
                 ax_traces.scatter(
-                    [data.time[idx_offset]],
-                    [smoothed[idx_offset]],
+                    [data.time[idx]],
+                    [smoothed[idx]],
                     color=color,
                     marker=marker,
                     s=80,
@@ -1340,21 +1689,27 @@ def plot_analysis_summary(
                     edgecolors="black",
                 )
 
-        p1_idx_orig = peak_info.get("p1_idx", 0)
+        trim_offset = peak_info.get("trim_start_idx", 0)
 
         # P1 (Start)
-        mark_peak(0, "cyan", "o", "P1 (Start)")
+        p1_idx_rel = peak_info.get("p1_idx", 0)
+        p1_idx = trim_offset + p1_idx_rel
+        mark_peak(p1_idx, "cyan", "o", "P1 (Start)")
 
         # P2 (Noise)
-        p2_idx_orig = peak_info.get("p2_idx", -1)
-        if p2_idx_orig != -1 and p2_idx_orig >= p1_idx_orig:
-            mark_peak(p2_idx_orig - p1_idx_orig, "red", "X", "P2 (Ignored)")
+        p2_idx_rel = peak_info.get("p2_idx", -1)
+        if p2_idx_rel != -1:
+            p2_idx = trim_offset + p2_idx_rel
+            if p2_idx >= p1_idx:
+                mark_peak(p2_idx, "red", "X", "P2 (Ignored)")
 
         # P3 (Fit) or P2 (Fit) - Green Star
         # We use 'fit_idx' from peak_info which tells us WHICH peak was used.
-        fit_idx_orig = peak_info.get("fit_idx", peak_info.get("p3_idx", 0))
-        if fit_idx_orig >= p1_idx_orig:
-            mark_peak(fit_idx_orig - p1_idx_orig, "lime", "*", "Fit Peak")
+        fit_idx_rel = peak_info.get("fit_idx", peak_info.get("p3_idx", 0))
+        fit_idx = trim_offset + fit_idx_rel
+
+        if fit_idx >= p1_idx:
+            mark_peak(fit_idx, "lime", "*", "Fit Peak")
 
     ax_traces.set_xlabel(f"Time ({raw_traces[0][0].metadata.get('time_unit', 's')})")
     ax_traces.set_ylabel("Signal Amplitude")
@@ -1427,7 +1782,7 @@ def plot_analysis_summary(
 
 
 if __name__ == "__main__":
-    for week in ("4.1",):
+    for week in ("4.2",):
         analyze(
             Path(rf"H:\My Drive\Lab C\NMR\week{week}"),
             experiment=None,
