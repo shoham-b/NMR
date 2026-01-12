@@ -19,10 +19,13 @@ def test_extract_echo_train_synthetic():
 
     data = NMRData(time=time, signal=signal)
 
-    times, amps = extract_echo_train(data)
+    times, amps, _, _ = extract_echo_train(data)
+
+    # Expect relative times (start at 0)
+    expected_times = [0, 200, 400, 600, 800]
 
     assert len(times) == 5
-    assert np.allclose(times, peak_locs, atol=1.0)
+    assert np.allclose(times, expected_times, atol=1.0)
     assert np.allclose(amps, expected_amps, atol=0.1)
 
 

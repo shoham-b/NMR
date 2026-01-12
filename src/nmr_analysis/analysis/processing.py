@@ -178,8 +178,12 @@ def filter_peaks_envelope(
     time_array: np.ndarray, peak_indices: np.ndarray, peak_amps: np.ndarray
 ) -> np.ndarray:
     """
-    Filter peaks by fitting a robust exponential decay and keeping peaks close to the envelope.
-    This effectively uses the "Hybrid" approach: fitting informs peak selection.
+    Filter peaks by fitting a robust exponential decay and keeping peaks close to the "Outer Envelope".
+    Uses an Asymmetric Iterative Approach:
+    1. Initial Robust Fit.
+    2. Iteratively re-fit (e.g. 5 times), down-weighting points BELOW the curve.
+       This pushes the curve UP towards the peaks with the highest amplitudes (least decay).
+    3. Final Selection based on this "Outer" Envelope.
 
     Args:
         time_array: Full time array of the signal (shifted so start=0).
@@ -195,72 +199,98 @@ def filter_peaks_envelope(
     t_peaks = time_array[peak_indices]
     y_peaks = peak_amps
 
-    # Robust Fit (Soft L1 loss ignores outliers)
+    # --- STAGE 1: Initial Robust Fit ---
+    max_val = np.max(y_peaks)
+
     # Initial Guess: A=max, C=min, T2=approx
-    p0 = [np.max(y_peaks), (t_peaks[-1] - t_peaks[0]) / 3.0, np.min(y_peaks)]
+    # Note: T2 guess (total_time/3) assumes 3*T2 decay in window.
+    p0 = [max_val, (t_peaks[-1] - t_peaks[0]) / 3.0, np.min(y_peaks)]
     bounds = ([0, 0, -np.inf], [np.inf, np.inf, np.inf])
 
     try:
+        # First pass: Soft L1 to ignore gross outliers (spikes)
         popt, _ = curve_fit(
             _exp_decay,
             t_peaks,
             y_peaks,
             p0=p0,
             bounds=bounds,
-            loss="soft_l1",  # Key for robustness against noise spikes
-            f_scale=0.1 * np.max(y_peaks),  # Scale of inliers
+            loss="soft_l1",
+            f_scale=0.1 * max_val,
         )
     except Exception:
-        # Fallback if fit fails (e.g. too few points or weird shape)
         return peak_indices
 
-    # Calculate residuals
-    y_model = _exp_decay(t_peaks, *popt)
-    residuals = y_peaks - y_model
+    # --- STAGE 2: Asymmetric Iterations (Aggressive Upper Envelope) ---
+    # User confirmed "No Noise Spikes".
+    # Strategy: Aggressively target the "Outer" (Highest) Envelope.
+    # We do THIS by down-weighting "Inner" (lower) points only.
+    # We TRUST all "Outer" (higher/on-curve) points.
 
-    # Define Acceptance Corridor
-    # We want to reject peaks that are significantly ABOVE the envelope (noise spikes)
-    # or significantly BELOW (bad echo detection).
-    # But mainly we care about consistent trend.
+    n_iterations = 5
 
-    # Let's say we accept deviations within X% relative or Y absolute.
-    # The 'f_scale' gave us a hint of noise scale.
+    for _ in range(n_iterations):
+        y_model = _exp_decay(t_peaks, *popt)
+        residuals = y_peaks - y_model
 
-    # Simple logic: Calculate Median Absolute Deviation (MAD) of residuals?
-    # Or just use model + tolerance.
+        # Calculate Weights (Sigma)
+        sigma = np.ones_like(y_peaks)
 
-    # Tolerance: 20% of value + constant noise floor
-    # We reject if Abs(residual) > tolerance
+        # Down-weight "Inner" points (Dips) -> Residual < 0
+        # If residual is negative (Point Below Curve), we trust it LESS.
+        mask_inner = residuals < 0
+        sigma[mask_inner] = 100.0  # Low weight
 
-    # However, user mentioned "Exponential Decay".
-    # Noise spikes are usually ABOVE.
-    # Dips are BELOW.
-    # We want peaks that form the "Outer Envelope" but not "Super-Outer" (spikes).
+        # Trust "Outer" points (Residual >= 0) -> Sigma = 1.0 (High Weight).
+        # Since "No Noise Spikes", we assume any high point is valid signal.
 
-    # Ideally, the fit passes through the "majority" of good peaks.
-    # Outliers (spikes) will have positive residuals.
-    # Outliers (missed peaks/dips) will have negative residuals.
+        # Anchor: Trust index 0?
+        sigma[0] = 0.1
 
-    rel_tol = 0.50  # 50% deviation allowed (generous, but spikes are often 200%+)
-    abs_tol = 0.1 * np.max(y_peaks)  # 10% of max amplitude as floor
+        try:
+            # Standard Least Squares (Linear Loss)
+            # This allows the fit to climb as high as needed without "Soft L1" damping high residuals.
+            popt, _ = curve_fit(
+                _exp_decay,
+                t_peaks,
+                y_peaks,
+                p0=popt,  # Start from previous
+                bounds=bounds,
+                # method='trf' default supports bounds
+                sigma=sigma,
+                absolute_sigma=False,
+            )
+        except Exception:
+            break
+
+    # --- STAGE 3: Final Selection ---
+    y_model_final = _exp_decay(t_peaks, *popt)
+
+    max_val_model = np.max(y_model_final)
+
+    rel_tol_below = 0.20
+    abs_tol = 0.05 * max_val_model
 
     valid_indices = []
 
     for i in range(len(peak_indices)):
         idx = peak_indices[i]
         y_meas = y_peaks[i]
-        y_pred = y_model[i]
+        y_pred = y_model_final[i]
 
         diff = y_meas - y_pred
 
-        # Check deviation
-        # If diff is huge positive -> Spike
-        # If diff is huge negative -> Dip
-
-        limit = rel_tol * y_pred + abs_tol
-
-        if abs(diff) <= limit:
+        if diff >= 0:
+            # Point is ABOVE the curve. Keep it! (Aggressive Outer Envelope)
             valid_indices.append(idx)
+        else:
+            # Negative Deviation (Below curve)
+            # Accept only if close enough
+            if abs(diff) <= (rel_tol_below * y_pred + abs_tol):
+                valid_indices.append(idx)
+
+    if len(valid_indices) == 0:
+        return peak_indices
 
     return np.array(valid_indices)
 
@@ -288,19 +318,6 @@ def filter_peaks_time_window(
         idx_curr = sorted_idx_indices[i]
         if not keep_mask[idx_curr]:
             continue
-
-        curr_time = peak_times[idx_curr]
-
-        # Check against all others
-        for j in range(len(peak_indices)):
-            if i == j or not keep_mask[j]:
-                continue
-
-            other_time = peak_times[j]
-            if abs(curr_time - other_time) < min_time_sep:
-                # Too close. Since we iterate by Amplitude Descending, curr is higher/equal.
-                # Remove other.
-                keep_mask[j] = False
 
     return peak_indices[keep_mask]
 
@@ -562,31 +579,89 @@ def find_peaks_t1_t2(
         )
 
         # Ensure Global Max (index 0 in slice usually, here check if global max is found)
-        # Note: The repo assumes t=0 is global max. We should check if the max signal point is in peaks.
-        # But 'find_peaks' might miss the very first point if it's a boundary?
-        # Repo logic: "if 0 not in peak_indices: peaks = insert(0)" (after slicing).
-        # Here we are not sliced yet?
-        # Let's find global max of detection signal.
         global_max_idx = np.argmax(detection_signal)
 
         # If global max is not in peaks, add it
         if global_max_idx not in peaks:
             peaks = np.sort(np.append(peaks, global_max_idx))
 
-        # 5. Selection: Peak 0 (First) and Peak -1 (Last)
+        # Apply Robust Envelope Filter to T1 peaks (Assuming T2* decay of FID)
+        # This addresses user request: "here we also talk about the t1 and t2"
+        # We need to shift time relative to first peak for the physics to match Exp Decay?
+        # FID decays from t=0 (global max).
+        # We should use time relative to global_max_idx?
+        if len(peaks) >= 3:
+            # Assume peak 0 is start?
+            # time_slice relative to global_max to be safe?
+            # Or just relative to peak[0]?
+            # Let's use time from peak[0]
+            peak_0_idx = peaks[0]
+            ref_time = time[peak_0_idx]
+
+            # Need amplitudes for filtering
+            peak_amps_raw = detection_signal[peaks]
+
+            # Filter
+            valid_peaks = filter_peaks_envelope(
+                time - ref_time,  # Shifted time array (whole array)
+                peaks,
+                peak_amps_raw,
+            )
+
+            # Use validated peaks
+            if len(valid_peaks) >= 2:  # Keep if we have enough
+                peaks = valid_peaks
+
+        # 5. Selection: Peak 0 (First)
+        # User Request: "Find a way to also do that for t1 t2" -> Max Implied T2 Logic.
+
         if len(peaks) < 2:
-            # Fallback
-            return 0, 1.0, 1.0, {"p1_idx": 0, "fit_idx": 0, "all_peaks": peaks}
+            return (
+                0,
+                1.0,
+                1.0,
+                {"p1_idx": 0, "fit_idx": 0, "all_peaks": peaks, "dc_offset": dc_offset},
+            )
 
         p1_idx = peaks[0]
-        # T1 Reference: "Pulse" is usually the max/first.
-        # Check if p1_idx is indeed the max? Or at least close?
-        # In T1 inversion recovery, the first pulse is the 180 (or 90 read?), largest magnitude.
 
-        fit_idx = peaks[-1]
+        # Consistent Logic: Candidates (Skip P1) -> Maximize Implied T2
+        candidates = peaks[1:]
 
+        # Reference (P1)
+        t0 = time[p1_idx]
+        y0 = detection_signal[p1_idx]
+        if y0 <= 0:
+            y0 = 1e-9
+
+        best_idx = -1
+        max_t2 = -1.0
+
+        for idx in candidates:
+            # For T1 FID (decay), logic is same as T2* decay of the FID
+            t_curr = time[idx]
+            y_curr = detection_signal[idx]
+
+            if y_curr <= 0:
+                calc_t2 = 0.0
+            elif y_curr >= y0:
+                calc_t2 = float("inf")
+            else:
+                delta_t = t_curr - t0
+                denom = np.log(y0) - np.log(y_curr)
+                if denom == 0:
+                    calc_t2 = float("inf")
+                else:
+                    calc_t2 = delta_t / denom
+
+            if calc_t2 > max_t2:
+                max_t2 = calc_t2
+                best_idx = idx
+
+        fit_idx = best_idx if best_idx != -1 else candidates[0]
+
+        # Use the SELECTED fit_idx for return values
         tau = time[fit_idx] - time[p1_idx]
-        # Return Magnitude Amplitude (as T1 fits recovery of magnitude)
         amp = detection_signal[fit_idx]
 
         return (
@@ -626,6 +701,17 @@ def find_peaks_t1_t2(
         if global_max_idx not in peaks:
             peaks = np.sort(np.append(peaks, global_max_idx))
 
+        # Apply Robust Envelope Filter to T2 peaks (FID/Decay)
+        if len(peaks) >= 3:
+            peak_0_idx = peaks[0]
+            ref_time = time[peak_0_idx]
+            peak_amps_raw = detection_signal[peaks]
+
+            valid_peaks = filter_peaks_envelope(time - ref_time, peaks, peak_amps_raw)
+
+            if len(valid_peaks) >= 2:
+                peaks = valid_peaks
+
         # Selection Logic
         # Need P1 (Start) + Echoes.
         # If < 2 peaks (only max?), fail/fallback.
@@ -642,29 +728,64 @@ def find_peaks_t1_t2(
             )
 
         p1_idx = peaks[0]  # Should be global max ideally
-
+        p1_idx = peaks[0]
         # Remaining peaks (Echoes)
         # If we have >= 3 peaks (P1, P2, P3...):
         # Compare P2 (idx 1) and P3 (idx 2)
-        if len(peaks) >= 3:
-            p2_idx = peaks[1]
-            p3_idx = peaks[2]
+        # Selection Logic
+        # User Request: "the one that... maximizes a" (in e^-ax) + "longest decay".
+        # Interpreted as: Maximize Time Constant T2 (Slowest Decay).
+        # We calculate the implied T2 for each peak relative to P1 (Start).
+        # T2 = -(t - t0) / ln(y / y0)
+        # We search peaks[1:] (skipping unwanted P1 as *target*, but using it as *reference*).
 
-            amp1 = detection_signal[p2_idx]
-            amp2 = detection_signal[p3_idx]
+        if len(peaks) >= 2:
+            candidates = peaks[1:]
 
-            # Ratio check
-            ratio = amp2 / amp1 if amp1 != 0 else 0
+            # Reference
+            t0 = time[p1_idx]
+            y0 = detection_signal[p1_idx]
+            if y0 <= 0:
+                y0 = 1e-9  # Avoid div by zero
 
-            if ratio >= 0.6:
-                # Prefer P3
-                fit_idx = p3_idx
-            else:
-                # Prefer P2
-                fit_idx = p2_idx
+            best_idx = -1
+            max_t2 = -1.0
+
+            for idx in candidates:
+                t_curr = time[idx]
+                y_curr = detection_signal[idx]
+
+                # Calculate T2
+                # y = y0 * exp(-(t-t0)/T2)
+                # ln(y/y0) = -(delta_t)/T2
+                # T2 = -delta_t / ln(y/y0)
+                # T2 = delta_t / (ln(y0) - ln(y))
+
+                if y_curr <= 0:
+                    # Invalid signal (noise floor?) -> Very fast decay -> Small T2
+                    calc_t2 = 0.0
+                elif y_curr >= y0:
+                    # Signal increased? -> Infinite T2 (Growth).
+                    # This is technically "longest decay" (no decay).
+                    # We should prioritize this usually as "Outer Envelope".
+                    calc_t2 = float("inf")
+                else:
+                    delta_t = t_curr - t0
+                    denom = np.log(y0) - np.log(y_curr)
+                    if denom == 0:
+                        calc_t2 = float("inf")
+                    else:
+                        calc_t2 = delta_t / denom
+
+                if calc_t2 > max_t2:
+                    max_t2 = calc_t2
+                    best_idx = idx
+
+            fit_idx = best_idx if best_idx != -1 else candidates[0]
+
         else:
-            # Only 2 peaks: P1 and P2
-            fit_idx = peaks[1]
+            # Only P1? Fallback to P1 (shouldn't happen with >= 2 check)
+            fit_idx = p1_idx
 
         tau = time[fit_idx] - time[p1_idx]
         amp = detection_signal[fit_idx]

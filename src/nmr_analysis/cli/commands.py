@@ -1291,7 +1291,13 @@ def _run_analysis(
                     # Ideally: Max Magnitude but Signed (to show Inversion).
                     # amp = sig[argmax(abs(sig))]
                     sig = processed_data.signal
-                    amp = sig[np.argmax(np.abs(sig))]
+                    # USE THE SELECTED PEAK from peak_info
+                    fit_idx = peak_info.get("fit_idx", 0)
+                    if fit_idx < len(sig):
+                        amp = sig[fit_idx]
+                    else:
+                        # Fallback if fit_idx out of bounds? (Should not happen)
+                        amp = sig[np.argmax(np.abs(sig))]
 
                     # Logic for "trace_label"
                     label = f.stem
@@ -1312,7 +1318,7 @@ def _run_analysis(
                     # - sort_val: float (for sorting, use tau)
 
                     raw_traces.append(
-                        (processed_data, data_full, 0.0, amp, tau, peak_info, tau)
+                        (processed_data, 0.0, amp, tau, peak_info, data_full, tau)
                     )
                 except Exception as e:
                     console.print(f"[yellow]Skipping {f.name}: {e}[/yellow]")
@@ -1990,7 +1996,7 @@ def plot_stacked_traces(
     cmap = cm.viridis
     norm = plt.Normalize(0, num_traces - 1 if num_traces > 1 else 1)
 
-    for i, (processed_data, data_full, t_peak, amp, tau, peak_info, *_) in enumerate(
+    for i, (processed_data, t_peak, amp, tau, peak_info, data_full, *_) in enumerate(
         raw_traces
     ):
         # Skip invalid trace data (e.g. from failed analysis)
