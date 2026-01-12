@@ -3,6 +3,7 @@ from typing import Tuple, Optional
 import numpy as np
 from scipy.signal import find_peaks
 from scipy.ndimage import gaussian_filter1d
+from scipy.optimize import curve_fit
 
 from nmr_analysis.core.types import NMRData, ExperimentType
 
@@ -127,9 +128,9 @@ def extract_echo_train(
     unsmoothed_abs = np.abs(signal)
     peak_amps = unsmoothed_abs[peaks_all]
 
-    valid_indices = filter_peaks_monotonic_reverse(peak_indices, peak_amps)
-
-    # Valid indices have been selected by filter_peaks_monotonic_reverse
+    # Hybrid Approach: robustly fit an exponential to candidates and keep those close to it
+    # This replaces the brittle monotonic filter.
+    valid_indices = filter_peaks_envelope(time_slice, peak_indices, peak_amps)
 
     # Identify excluded indices
     excluded_indices = np.setdiff1d(peak_indices, valid_indices)
@@ -153,17 +154,6 @@ def filter_peaks_monotonic_reverse(
     """
     Filter peaks to ensure they are Monotonically Ascending when viewed BACKWARDS.
     (i.e. strictly decaying when viewed forwards, ignoring dips).
-
-    Logic:
-    Iterate backwards from the last peak.
-    Keep a peak ONLY if it is > max_amp_so_far.
-
-    Args:
-        peak_indices: Indices of peaks.
-        peak_amps: Amplitudes of peaks.
-
-    Returns:
-        np.ndarray: Indices of kept peaks, sorted in original time order (ascending).
     """
     valid_indices = []
     max_amp_so_far = -1.0
@@ -178,6 +168,101 @@ def filter_peaks_monotonic_reverse(
 
     # Restore time order (valid_indices was built backwards)
     return np.array(sorted(valid_indices))
+
+
+def _exp_decay(t, A, T2, C):
+    return A * np.exp(-t / T2) + C
+
+
+def filter_peaks_envelope(
+    time_array: np.ndarray, peak_indices: np.ndarray, peak_amps: np.ndarray
+) -> np.ndarray:
+    """
+    Filter peaks by fitting a robust exponential decay and keeping peaks close to the envelope.
+    This effectively uses the "Hybrid" approach: fitting informs peak selection.
+
+    Args:
+        time_array: Full time array of the signal (shifted so start=0).
+        peak_indices: Indices of candidate peaks.
+        peak_amps: Amplitudes of candidate peaks.
+
+    Returns:
+        np.ndarray: Indices of kept peaks.
+    """
+    if len(peak_indices) < 3:
+        return peak_indices
+
+    t_peaks = time_array[peak_indices]
+    y_peaks = peak_amps
+
+    # Robust Fit (Soft L1 loss ignores outliers)
+    # Initial Guess: A=max, C=min, T2=approx
+    p0 = [np.max(y_peaks), (t_peaks[-1] - t_peaks[0]) / 3.0, np.min(y_peaks)]
+    bounds = ([0, 0, -np.inf], [np.inf, np.inf, np.inf])
+
+    try:
+        popt, _ = curve_fit(
+            _exp_decay,
+            t_peaks,
+            y_peaks,
+            p0=p0,
+            bounds=bounds,
+            loss="soft_l1",  # Key for robustness against noise spikes
+            f_scale=0.1 * np.max(y_peaks),  # Scale of inliers
+        )
+    except Exception:
+        # Fallback if fit fails (e.g. too few points or weird shape)
+        return peak_indices
+
+    # Calculate residuals
+    y_model = _exp_decay(t_peaks, *popt)
+    residuals = y_peaks - y_model
+
+    # Define Acceptance Corridor
+    # We want to reject peaks that are significantly ABOVE the envelope (noise spikes)
+    # or significantly BELOW (bad echo detection).
+    # But mainly we care about consistent trend.
+
+    # Let's say we accept deviations within X% relative or Y absolute.
+    # The 'f_scale' gave us a hint of noise scale.
+
+    # Simple logic: Calculate Median Absolute Deviation (MAD) of residuals?
+    # Or just use model + tolerance.
+
+    # Tolerance: 20% of value + constant noise floor
+    # We reject if Abs(residual) > tolerance
+
+    # However, user mentioned "Exponential Decay".
+    # Noise spikes are usually ABOVE.
+    # Dips are BELOW.
+    # We want peaks that form the "Outer Envelope" but not "Super-Outer" (spikes).
+
+    # Ideally, the fit passes through the "majority" of good peaks.
+    # Outliers (spikes) will have positive residuals.
+    # Outliers (missed peaks/dips) will have negative residuals.
+
+    rel_tol = 0.50  # 50% deviation allowed (generous, but spikes are often 200%+)
+    abs_tol = 0.1 * np.max(y_peaks)  # 10% of max amplitude as floor
+
+    valid_indices = []
+
+    for i in range(len(peak_indices)):
+        idx = peak_indices[i]
+        y_meas = y_peaks[i]
+        y_pred = y_model[i]
+
+        diff = y_meas - y_pred
+
+        # Check deviation
+        # If diff is huge positive -> Spike
+        # If diff is huge negative -> Dip
+
+        limit = rel_tol * y_pred + abs_tol
+
+        if abs(diff) <= limit:
+            valid_indices.append(idx)
+
+    return np.array(valid_indices)
 
 
 def filter_peaks_time_window(

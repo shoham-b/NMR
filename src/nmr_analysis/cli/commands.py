@@ -28,6 +28,119 @@ app = typer.Typer()
 console = Console()
 
 
+def _generate_plot_filename(
+    path: Path,
+    experiment: ExperimentType,
+    graph_type: str,
+    prefix: str = "",
+) -> str:
+    """
+    Generate plot filename in format: {week}_{substance}_T{type}_{graphtype}.png
+
+    Args:
+        path: The path to the data directory/file being analyzed.
+        experiment: The experiment type (T1, T2, T2_STAR, etc.).
+        graph_type: Type of graph (fit, traces, combined, etc.).
+        prefix: Optional prefix (usually week info from parent directory).
+
+    Returns:
+        Formatted filename string.
+    """
+    import re
+
+    # Extract week from prefix or parent directories
+    # Look for patterns like "week4.2", "week_4", "wk5", etc.
+    week = ""
+    if prefix:
+        week_match = re.search(
+            r"(week[_\-\s]?\d+\.?\d*|wk[_\-\s]?\d+\.?\d*)", prefix, re.IGNORECASE
+        )
+        if week_match:
+            week = (
+                week_match.group(1).replace(" ", "").replace("-", "").replace("_", "")
+            )
+
+    # If no week in prefix, try to find in path ancestry
+    if not week:
+        for parent in [path] + list(path.parents):
+            week_match = re.search(
+                r"(week[_\-\s]?\d+\.?\d*|wk[_\-\s]?\d+\.?\d*)",
+                parent.name,
+                re.IGNORECASE,
+            )
+            if week_match:
+                week = (
+                    week_match.group(1)
+                    .replace(" ", "")
+                    .replace("-", "")
+                    .replace("_", "")
+                )
+                break
+
+    # Determine substance from directory structure
+    # The substance is the parent directory (e.g., "methanol", "water", "glycerin")
+    # If not in a nested directory, default to "mineral-oil"
+    target_name = path.name.lower()
+    parent_name = path.parent.name.lower() if path.parent else ""
+
+    # Check if current path is a substance directory or an experiment directory
+    experiment_aliases = {
+        "t1",
+        "t2",
+        "t2~",
+        "t2_star",
+        "t2_single",
+        "t2multiple",
+        "t2_multiple",
+        "t2combined",
+        "t2_combined",
+        "diffusion",
+    }
+
+    if target_name in experiment_aliases:
+        # Path is an experiment folder (like "t2"), so substance is the parent
+        substance = (
+            parent_name
+            if parent_name and parent_name not in experiment_aliases
+            else "mineral-oil"
+        )
+    else:
+        # Path itself could be the substance folder (has experiment subfolders)
+        # Or it's a top-level folder without nesting
+        # Check if parent contains week pattern
+        if parent_name and any(pat in parent_name for pat in ["week", "wk"]):
+            # Parent is "week4.2", so target is the substance
+            substance = target_name
+        elif parent_name and parent_name not in experiment_aliases:
+            substance = parent_name
+        else:
+            substance = "mineral-oil"
+
+    # Clean substance name (remove unwanted characters)
+    substance = substance.replace(" ", "-").replace("_", "-")
+
+    # Map experiment type to short string
+    type_map = {
+        ExperimentType.T1: "T1",
+        ExperimentType.T2: "T2",
+        ExperimentType.T2_STAR: "T2star",
+        ExperimentType.T2_COMBINED: "T2combined",
+        ExperimentType.SPECTRUM: "Spectrum",
+        ExperimentType.DIFFUSION: "Diffusion",
+    }
+    exp_str = type_map.get(experiment, experiment.value)
+
+    # Build filename
+    parts = []
+    if week:
+        parts.append(week)
+    parts.append(substance)
+    parts.append(exp_str)
+    parts.append(graph_type)
+
+    return "_".join(parts) + ".png"
+
+
 @app.command()
 def gui():
     """
@@ -376,10 +489,8 @@ def _run_analysis(
                         # If save_path is a directory (via batch or single with dir input), use it
                         # If single file input, save_path might be parent dir
                         out_dir = save_path if save_path.is_dir() else save_path.parent
-                        fname = (
-                            f"{prefix}_{target_file.stem}_fit.png"
-                            if prefix
-                            else f"{target_file.stem}_fit.png"
+                        fname = _generate_plot_filename(
+                            target_file, experiment, "fit", prefix
                         )
                         filepath = out_dir / fname
                         console.print(f"Saving plot to {filepath.as_uri()}")
@@ -514,11 +625,14 @@ def _run_analysis(
             # Plot Standard T2 Result (Primary)
             if plot:
                 out_dir = save_path if save_path else target_files[0].parent
-                dirname = path.name if path.is_dir() else path.parent.name
-                p_str = f"{prefix}_" if prefix else ""
-
-                filepath_fit = out_dir / f"{p_str}{dirname}_t2_fit.png"
-                filepath_traces = out_dir / f"{p_str}{dirname}_t2_traces.png"
+                fname_fit = _generate_plot_filename(
+                    path, ExperimentType.T2, "fit", prefix
+                )
+                fname_traces = _generate_plot_filename(
+                    path, ExperimentType.T2, "traces", prefix
+                )
+                filepath_fit = out_dir / fname_fit
+                filepath_traces = out_dir / fname_traces
 
                 console.print(f"Saving fit plot to {filepath_fit}")
                 console.print(
@@ -577,7 +691,8 @@ def _run_analysis(
                     plot_hybrid_result(
                         hybrid_res,
                         out_dir,
-                        prefix=f"{prefix_str}spectral_detail",
+                        source_path=path,
+                        prefix=prefix,
                     )
                     console.print("[green]Spectral detail plots saved.[/green]")
                 except Exception as e:
@@ -1069,10 +1184,8 @@ def _run_analysis(
             # We want: Raw Data + Peaks + Fit Curve on ONE graph
             filepath = None
             if save_path:
-                fname = (
-                    f"{prefix}_{target_file.stem}_combined_fit.png"
-                    if prefix
-                    else f"{target_file.stem}_combined_fit.png"
+                fname = _generate_plot_filename(
+                    target_file, experiment, "combined", prefix
                 )
                 filepath = save_path / fname
                 console.print(f"Saving plot to {filepath}")
@@ -1314,14 +1427,12 @@ def _run_analysis(
             filepath_fit = None
             filepath_traces = None
             if save_path:
-                dirname = path.name
-                p_str = f"{prefix}_" if prefix else ""
-                filepath_fit = (
-                    save_path / f"{p_str}{dirname}_{experiment.value}_fit.png"
+                fname_fit = _generate_plot_filename(path, experiment, "fit", prefix)
+                fname_traces = _generate_plot_filename(
+                    path, experiment, "traces", prefix
                 )
-                filepath_traces = (
-                    save_path / f"{p_str}{dirname}_{experiment.value}_traces.png"
-                )
+                filepath_fit = save_path / fname_fit
+                filepath_traces = save_path / fname_traces
                 console.print(f"Saving fit plot to {filepath_fit}")
                 console.print(f"Saving traces plot to {filepath_traces}")
 
@@ -1380,7 +1491,12 @@ def plot_spectrum_fit(freqs, mag_data, result, filepath=None):
     plt.close()
 
 
-def plot_hybrid_result(result: HybridAnalysisResult, out_dir: Path, prefix: str = ""):
+def plot_hybrid_result(
+    result: HybridAnalysisResult,
+    out_dir: Path,
+    source_path: Optional[Path] = None,
+    prefix: str = "",
+):
     """
     Generate plots for Hybrid Analysis:
     1. Stacked Overview: Time Traces (Left) + Frequency Spectra (Right).
@@ -1431,7 +1547,15 @@ def plot_hybrid_result(result: HybridAnalysisResult, out_dir: Path, prefix: str 
     fig_stack.suptitle(f"Hybrid Analysis Overview: {result.dataset_name}", fontsize=14)
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
 
-    fname_stack = f"{prefix}_stacked_overview.png"
+    # Generate filename using helper if source_path is available
+    if source_path:
+        fname_stack = _generate_plot_filename(
+            source_path, ExperimentType.SPECTRUM, "stacked-overview", prefix
+        )
+    else:
+        fname_stack = (
+            f"{prefix}_stacked_overview.png" if prefix else "stacked_overview.png"
+        )
     plt.savefig(out_dir / fname_stack)
     plt.close(fig_stack)
     console.print(f"Saved {fname_stack}")
@@ -1524,7 +1648,13 @@ def plot_hybrid_result(result: HybridAnalysisResult, out_dir: Path, prefix: str 
     fig_fit.suptitle(f"T2 Decay Analysis: {result.dataset_name}", fontsize=16)
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
 
-    fname_fit = f"{prefix}_t2_decay.png"
+    # Generate filename using helper if source_path is available
+    if source_path:
+        fname_fit = _generate_plot_filename(
+            source_path, ExperimentType.SPECTRUM, "t2-decay", prefix
+        )
+    else:
+        fname_fit = f"{prefix}_t2_decay.png" if prefix else "t2_decay.png"
     plt.savefig(out_dir / fname_fit)
     plt.close(fig_fit)
     console.print(f"Saved {fname_fit}")
