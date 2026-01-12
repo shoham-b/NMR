@@ -70,8 +70,9 @@ def save_summary_csv(
             row[k] = v
 
         # Flatten param errors
-        for k, v in res.param_errors.items():
-            row[f"{k}_error"] = v
+        if isinstance(res.param_errors, dict):
+            for k, v in res.param_errors.items():
+                row[f"{k}_error"] = v
 
         # Add key metadata
         # e.g. T2_fixed if present

@@ -1,8 +1,10 @@
+from typing import Tuple, Optional
+
 import numpy as np
 from scipy.optimize import curve_fit
-from typing import Tuple, Optional
-from nmr_analysis.core.types import NMRData, AnalysisResult, ExperimentType
+
 from nmr_analysis.analysis.models import t1_model, t2_decay_model
+from nmr_analysis.core.types import NMRData, AnalysisResult, ExperimentType
 
 
 class Fitter:
@@ -15,12 +17,32 @@ class Fitter:
         Returns: params, fit_curve, residuals, r_squared, param_errors
         """
         # Initial guess
+        # Initial guess
         M0_guess = np.max(np.abs(amplitudes))
-        T1_guess = np.mean(delays) if len(delays) > 0 else 1.0
+
+        # Smarter T1 Guess
+        if len(delays) > 0:
+            if amplitudes[0] < -0.5 * M0_guess:
+                # Significant inversion
+                if amplitudes[-1] < 0:
+                    # Still inverted at end -> Long T1
+                    T1_guess = np.max(delays) * 5.0
+                else:
+                    # Crosses zero -> T1 is around zero crossing
+                    # Find index closest to zero
+                    idx_min = np.argmin(np.abs(amplitudes))
+                    # Zero crossing is at t = T1 * ln(2*alpha) approx T1*0.69
+                    # So T1 = t / 0.69
+                    T1_guess = delays[idx_min] / 0.693
+            else:
+                T1_guess = np.mean(delays)
+        else:
+            T1_guess = 1.0
+
         p0 = [M0_guess, T1_guess, 1.0]
 
         try:
-            popt, pcov = curve_fit(t1_model, delays, amplitudes, p0=p0)
+            popt, pcov = curve_fit(t1_model, delays, amplitudes, p0=p0, maxfev=10000)
             M0, T1, alpha = popt
             fit_curve = t1_model(delays, *popt)
             residuals = amplitudes - fit_curve
@@ -38,7 +60,8 @@ class Fitter:
                 r2,
                 param_errors,
             )
-        except (RuntimeError, ValueError):
+        except (RuntimeError, ValueError) as e:
+            print(f"Fit failed: {e}")
             return {}, np.zeros_like(delays), np.zeros_like(delays), 0.0, {}
 
     @staticmethod
@@ -52,6 +75,15 @@ class Fitter:
         M0_guess = np.max(amplitudes) if len(amplitudes) > 0 else 1.0
         T2_guess = np.mean(delays) if len(delays) > 0 else 1.0
         p0 = [M0_guess, T2_guess, 0.0]
+
+        if len(delays) < 3:
+            return (
+                {},
+                np.zeros_like(delays),
+                np.zeros_like(delays),
+                0.0,
+                {"error": "Insufficient data"},
+            )
 
         try:
             popt, pcov = curve_fit(t2_decay_model, delays, amplitudes, p0=p0)
@@ -76,6 +108,73 @@ class Fitter:
             )
         except (RuntimeError, ValueError):
             return {}, np.zeros_like(delays), np.zeros_like(delays), 0.0, {}
+
+    @staticmethod
+    def fit_modulated_t2(
+        delays: np.ndarray, amplitudes: np.ndarray, guess_J: float = 7.0
+    ) -> Tuple[dict, np.ndarray, np.ndarray, float, dict]:
+        """
+        Fit J-Modulated T2 Spin Echo decay.
+        Model: | M0 * exp(-t/T2) * cos(pi*J*t) | + offset
+        Recommended guess_J: 7.0 Hz (typical for H-H coupling)
+        """
+        from nmr_analysis.analysis.models import j_modulated_t2
+
+        M0_guess = np.max(amplitudes) if len(amplitudes) > 0 else 1.0
+        T2_guess = np.mean(delays) if len(delays) > 0 else 0.5
+        offset_guess = 0.0
+
+        # p0: [M0, T2, J, offset]
+        p0 = [M0_guess, T2_guess, guess_J, offset_guess]
+
+        try:
+            # Bounds: M0>0, T2>0, J>0, offset can be whatever (usually >0)
+            bounds_min = [0, 0, 0, -np.inf]
+            bounds_max = [
+                np.inf,
+                np.inf,
+                20.0,
+                np.inf,
+            ]  # Limit J < 20Hz for typical H-H?
+
+            popt, pcov = curve_fit(
+                j_modulated_t2,
+                delays,
+                amplitudes,
+                p0=p0,
+                bounds=(bounds_min, bounds_max),
+            )
+            M0, T2, J, offset = popt
+            fit_curve = j_modulated_t2(delays, *popt)
+            residuals = amplitudes - fit_curve
+
+            ss_res = np.sum(residuals**2)
+            ss_tot = np.sum((amplitudes - np.mean(amplitudes)) ** 2)
+            r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0.0
+
+            perr = np.sqrt(np.diag(pcov))
+            param_errors = {
+                "M0": perr[0],
+                "T2": perr[1],
+                "J": perr[2],
+                "offset": perr[3],
+            }
+
+            return (
+                {"M0": M0, "T2": T2, "J": J, "offset": offset},
+                fit_curve,
+                residuals,
+                r2,
+                param_errors,
+            )
+        except (RuntimeError, ValueError) as e:
+            return (
+                {},
+                np.zeros_like(delays),
+                np.zeros_like(delays),
+                0.0,
+                {"error": str(e)},
+            )
 
     @staticmethod
     def fit_t2_star(
@@ -152,6 +251,27 @@ class Fitter:
         # Use smoothed data for fitting? User: "also use smoothing for the data"
         t_fit = time[global_start_fit_idx:global_end_fit_idx]
         mag_fit = detection_signal[global_start_fit_idx:global_end_fit_idx]
+
+        print(
+            f"DEBUG: fit_t2_star - len(t_fit)={len(t_fit)}, start={global_start_fit_idx}, end={global_end_fit_idx}"
+        )
+
+        # Check for insufficient data points (Need at least 3 for M0, T2, offset)
+        if len(t_fit) < 3:
+            return AnalysisResult(
+                experiment_type=ExperimentType.T2_STAR,
+                dataset_name="T2* Analysis (Insufficient Data)",
+                params={},
+                fit_curve=np.full_like(time, np.nan),
+                residuals=np.zeros_like(raw_magnitude),
+                r_squared=0.0,
+                metadata={
+                    "source": "smoothed_fit_v2",
+                    "error": f"Insufficient data points for fitting: {len(t_fit)} < 3",
+                    "start_index": global_start_fit_idx,
+                    "end_index": global_end_fit_idx,
+                },
+            )
 
         # Initial guess
         M0_guess = np.max(mag_fit) if len(mag_fit) > 0 else 1.0
@@ -478,4 +598,118 @@ class Fitter:
                 residuals=np.array([]),
                 r_squared=0.0,
                 metadata={},
+            )
+
+    @staticmethod
+    def fit_multiplet_spectrum(
+        freqs: np.ndarray,
+        spectrum: np.ndarray,
+        multiplets_config: list,
+    ) -> AnalysisResult:
+        """
+        Fit spectrum with known multiplets.
+        multiplets_config: List of dicts:
+            [
+                {'center': 100.0, 'multiplicity': 3, 'initial_J': 7.0, 'initial_gamma': 5.0},
+                ...
+            ]
+        """
+        from nmr_analysis.analysis.models import multi_multiplet_lorentzian
+
+        mag_spec = np.abs(spectrum)
+
+        # 1. Build Initial Guess and Bounds
+        # Params: [offset,  (A, center, J, gamma)...]
+        offset_guess = np.median(mag_spec)
+        p0 = [offset_guess]
+        bounds_min = [-np.inf]
+        bounds_max = [np.inf]
+
+        multiplicities = []
+        n_multiplets = len(multiplets_config)
+
+        for m_conf in multiplets_config:
+            center_guess = m_conf.get("center", 0.0)
+            mult = m_conf.get("multiplicity", 1)
+            J_guess = m_conf.get("initial_J", 7.0)
+            gamma_guess = m_conf.get("initial_gamma", 5.0)  # ~10Hz width
+
+            # Estimate Amplitude
+            # Multiplet peak height depends on multiplicity.
+            # Simplified: take max value near center as rough guess for "A" scale
+            idx = np.argmin(np.abs(freqs - center_guess))
+            amp_guess = max(mag_spec[idx] - offset_guess, 0.0) * gamma_guess
+
+            p0.extend([amp_guess, center_guess, J_guess, gamma_guess])
+
+            # Bounds
+            # A > 0
+            # Center +/- 100 Hz? Let's say unbounded or slightly constrained? Unbounded is risky.
+            # center +/- 50Hz
+            # J: 0.1 to 50 Hz
+            # gamma: 0.1 to 100 Hz
+            bounds_min.extend([0, center_guess - 50, 0.1, 0.1])
+            bounds_max.extend([np.inf, center_guess + 50, 50.0, 100.0])
+
+            multiplicities.append(mult)
+
+        multiplicities_arr = np.array(multiplicities, dtype=np.int32)
+
+        # 2. Fit Function Wrapper
+        def fit_func(f, *params):
+            return multi_multiplet_lorentzian(
+                f, np.array(params), multiplicities_arr, n_multiplets
+            )
+
+        try:
+            popt, pcov = curve_fit(
+                fit_func, freqs, mag_spec, p0=p0, bounds=(bounds_min, bounds_max)
+            )
+
+            # 3. Extract Results
+            offset_fit = popt[0]
+            fit_curve = fit_func(freqs, *popt)
+            residuals = mag_spec - fit_curve
+
+            ss_res = np.sum(residuals**2)
+            ss_tot = np.sum((mag_spec - np.mean(mag_spec)) ** 2)
+            r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+
+            multiplet_results = []
+            perr = np.sqrt(np.diag(pcov))
+
+            current_idx = 1
+            for i in range(n_multiplets):
+                res = {
+                    "multiplicity": int(multiplicities_arr[i]),
+                    "amplitude": popt[current_idx],
+                    "center": popt[current_idx + 1],
+                    "J": popt[current_idx + 2],
+                    "gamma": popt[current_idx + 3],
+                    "amplitude_err": perr[current_idx],
+                    "center_err": perr[current_idx + 1],
+                    "J_err": perr[current_idx + 2],
+                    "gamma_err": perr[current_idx + 3],
+                }
+                multiplet_results.append(res)
+                current_idx += 4
+
+            return AnalysisResult(
+                experiment_type=ExperimentType.T2_STAR,
+                dataset_name="Multiplet Analysis",
+                params={"offset": offset_fit, "multiplets": multiplet_results},
+                fit_curve=fit_curve,
+                residuals=residuals,
+                r_squared=r2,
+                metadata={"freqs": freqs, "spectrum_magnitude": mag_spec},
+            )
+
+        except Exception as e:
+            return AnalysisResult(
+                experiment_type=ExperimentType.T2_STAR,
+                dataset_name="Multiplet Analysis (Failed)",
+                params={"error": str(e)},
+                fit_curve=np.array([]),
+                residuals=np.array([]),
+                r_squared=0.0,
             )

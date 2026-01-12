@@ -74,12 +74,44 @@ def test_t2_star_fitting_no_peak_found():
     assert start_idx > 0  # At least it tried
 
 
+def test_t2_star_fitting_insufficient_data():
+    """
+    Test that fitting fails gracefully (returns result with error/NaNs)
+    instead of raising RuntimeError when there are fewer data points than parameters (3).
+    """
+    time = np.linspace(0, 10, 100)
+    signal = np.zeros_like(time)
+
+    # Create a scenario where peak finding + trimming leaves < 3 points
+    # e.g., Peak at the very end
+    peak_idx = 98
+    signal[peak_idx] = 10.0
+
+    # This will lead to start_idx around 98.
+    # length is 100.
+    # data points: 98, 99. Length = 2.
+    # Parameters needed: 3 (M0, T2, offset).
+
+    data = NMRData(time=time, signal=signal, metadata={})
+
+    # Should not raise exception
+    result = Fitter.fit_t2_star(data)
+
+    # Should be a failed fit result
+    assert result.r_squared == 0.0
+    assert "Insufficient data" in str(
+        result.metadata.get("error", "")
+    ) or "Fit Failed" in str(result.metadata.get("error", ""))
+
+
 if __name__ == "__main__":
     try:
         test_t2_star_fitting_starts_after_peak()
         print("test_t2_star_fitting_starts_after_peak PASSED")
         test_t2_star_fitting_no_peak_found()
         print("test_t2_star_fitting_no_peak_found PASSED")
+        test_t2_star_fitting_insufficient_data()
+        print("test_t2_star_fitting_insufficient_data PASSED")
     except Exception as e:
         print(f"FAILED: {e}")
         raise

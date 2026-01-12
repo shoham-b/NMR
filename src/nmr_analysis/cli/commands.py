@@ -102,9 +102,10 @@ def analyze(
             # Use lower case for matching but preserve original name for output/logging
             name_lower = item.name.lower()
 
-            if name_lower in ALIAS_MAP or name_lower.endswith("nol"):
-                if name_lower.endswith("nol"):
-                    exp_type = ExperimentType.SPECTRUM
+            if name_lower in ALIAS_MAP:
+                if name_lower == "t2~":
+                    # Explicit mapping because dictionary lookup might be ambiguous on some setups
+                    exp_type = ExperimentType.T2_STAR
                 else:
                     exp_type = ALIAS_MAP[name_lower]
 
@@ -433,13 +434,128 @@ def _run_analysis(
                 console.print("[red]No valid data loaded for hybrid analysis.[/red]")
                 return []
 
+            # --- Run Standard T2 (Time Domain) Analysis First (Primary) ---
+            # This will be the main result, consistent with other materials
+            console.print(
+                "[bold cyan]Running Standard T2 (Time Domain) Analysis...[/bold cyan]"
+            )
+
+            td_delays = []
+            td_amplitudes = []
+            td_raw_traces = []
+
+            # Sort data by tau for processing
+            tau_list = []
+            for tf in target_files:
+                try:
+                    # Parse tau from filename
+                    tau = parse_time_from_filename(tf)
+                    if tau is None:
+                        tau = get_delay_from_metadata(
+                            get_loader(tf, channel=channel).load(tf)
+                        )
+                    tau_list.append((tau, tf))
+                except Exception:
+                    console.print(
+                        f"[yellow]Could not parse tau from {tf.name}[/yellow]"
+                    )
+
+            tau_list.sort(key=lambda x: x[0])
+
+            for tau, tf in tau_list:
+                try:
+                    loader = get_loader(tf, channel=channel)
+                    d = loader.load(tf)
+
+                    # Preprocess
+                    processed_data, _, _, peak_info = preprocess_data(
+                        d, smoothing=ANALYSIS_SMOOTHING
+                    )
+
+                    # Extract Amplitude (Max Magnitude)
+                    amp = np.max(np.abs(processed_data.signal))
+
+                    td_delays.append(tau)
+                    td_amplitudes.append(amp)
+
+                    # Create raw trace tuple for plotting
+                    # Format: (processed_data, t_peak, amp, tau, peak_info, data_full, sort_val)
+                    processed_data.metadata["trace_label"] = f"{tf.stem}"
+                    td_raw_traces.append(
+                        (processed_data, 0.0, amp, tau, peak_info, d, tau)
+                    )
+                except Exception as e:
+                    console.print(f"[yellow]Error processing {tf.name}: {e}[/yellow]")
+
+            td_delays = np.array(td_delays)
+            td_amplitudes = np.array(td_amplitudes)
+
+            # Fit T2 (Time Domain)
+            params, fit_curve, residuals, r2, param_errors = Fitter.fit_t2(
+                td_delays, td_amplitudes
+            )
+
+            # Determine experiment name from directory
+            dataset_label = path.name if path.is_dir() else path.parent.name
+            td_name = f"T2 Analysis: {dataset_label}"
+
+            td_result = AnalysisResult(
+                experiment_type=ExperimentType.T2,
+                dataset_name=td_name,
+                params=params,
+                fit_curve=fit_curve,
+                residuals=residuals,
+                r_squared=r2,
+                param_errors=param_errors,
+            )
+
+            print_result(td_result)
+
+            # Plot Standard T2 Result (Primary)
+            if plot:
+                out_dir = save_path if save_path else target_files[0].parent
+                dirname = path.name if path.is_dir() else path.parent.name
+                p_str = f"{prefix}_" if prefix else ""
+
+                filepath_fit = out_dir / f"{p_str}{dirname}_t2_fit.png"
+                filepath_traces = out_dir / f"{p_str}{dirname}_t2_traces.png"
+
+                console.print(f"Saving fit plot to {filepath_fit}")
+                console.print(
+                    f"Saving traces plot (3 columns: processed, raw, Fourier) to {filepath_traces}"
+                )
+
+                plot_stacked_traces(
+                    td_raw_traces,
+                    filepath=filepath_traces,
+                    smoothing=ANALYSIS_SMOOTHING,
+                    show_fourier=True,
+                )
+
+                plot_analysis_summary(
+                    td_delays,
+                    td_amplitudes,
+                    td_result,
+                    td_raw_traces,
+                    "Delay (s)",
+                    "Amplitude",
+                    filepath=filepath_fit,
+                    smoothing=ANALYSIS_SMOOTHING,
+                    show_fourier=True,
+                )
+
+            # --- ALSO run Hybrid Spectral Analysis (Supplementary) ---
+            console.print(
+                "[bold green]Running Supplementary Spectral Analysis...[/bold green]"
+            )
+
             hybrid_res = analyze_spectral_series(data_list, names)
 
             # Print Summary
             console.print(
-                f"[bold]Hybrid Analysis Results: {hybrid_res.dataset_name}[/bold]"
+                f"[bold]Spectral Analysis Details: {hybrid_res.dataset_name}[/bold]"
             )
-            table = Table(title="Spectral T2 Results")
+            table = Table(title="Spectral T2 Results (Per Frequency Peak)")
             table.add_column("Peak Freq (Hz)", justify="right")
             table.add_column("T2 (s)", justify="right")
             table.add_column("M0", justify="right")
@@ -457,14 +573,25 @@ def _run_analysis(
             if plot:
                 out_dir = save_path if save_path else target_files[0].parent
                 prefix_str = f"{prefix}_" if prefix else ""
-                # Use dataset name (clean) for plotting
-                plot_hybrid_result(
-                    hybrid_res,
-                    out_dir,
-                    prefix=f"{prefix_str}hybrid_{hybrid_res.dataset_name}",
-                )
+                try:
+                    plot_hybrid_result(
+                        hybrid_res,
+                        out_dir,
+                        prefix=f"{prefix_str}spectral_detail",
+                    )
+                    console.print("[green]Spectral detail plots saved.[/green]")
+                except Exception as e:
+                    console.print(
+                        f"[yellow]Could not plot spectral details: {e}[/yellow]"
+                    )
 
-            return []
+            # Return standard T2 result as primary (consistent with other materials)
+            aggregated_data = NMRData(time=td_delays, signal=td_amplitudes)
+            return [
+                AnalysisContext(
+                    data=aggregated_data, result=td_result, raw_traces=td_raw_traces
+                )
+            ]
 
         else:
             # Standard Single File Analysis
@@ -475,10 +602,71 @@ def _run_analysis(
                     console.print(f"Loading {target_file.name}...")
                     loader = get_loader(target_file, channel=channel)
                     data = loader.load(target_file)
+                    # 1. Compute Spectrum for visualization (Focused on 2nd Peak if available)
+                    from scipy.signal import find_peaks
+                    from scipy.ndimage import gaussian_filter1d
 
-                    # 1. Compute Spectrum for visualization
-                    console.print("Computing Spectrum...")
-                    freqs, spect = compute_spectrum(data)
+                    sig_abs = np.abs(data.signal)
+                    time = data.time
+                    dt = time[1] - time[0] if len(time) > 1 else 1.0
+
+                    # Smooth to find envelope (Echoes)
+                    # Try sigma corresponding to 50 microseconds -> ~0.5ms?
+                    # If dt ~ 2e-7 (5MHz), 1ms = 5000 pts.
+                    # sigma=500 pts is heavy.
+                    sigma_points = int(50e-6 / dt)
+                    if sigma_points < 1:
+                        sigma_points = 1
+
+                    smoothed_sig = gaussian_filter1d(
+                        sig_abs, sigma=sigma_points * 10
+                    )  # Heavy smoothing
+
+                    # Distance: Say echoes are at least 1ms apart
+                    dist_points = int(1e-3 / dt)
+                    if dist_points < 100:
+                        dist_points = 100
+
+                    # Height: 5% of max
+                    peaks, _ = find_peaks(
+                        smoothed_sig,
+                        distance=dist_points,
+                        height=0.05 * np.max(smoothed_sig),
+                    )
+
+                    if len(peaks) >= 2:
+                        console.print(
+                            f"Detected {len(peaks)} peaks. Focusing on 2nd peak (idx={peaks[1]})."
+                        )
+
+                        p1 = peaks[0]
+                        p2 = peaks[1]
+                        spacing = p2 - p1
+
+                        # Define window around P2
+                        # Start halfway from P1
+                        start_idx = int(p2 - (spacing // 2))
+                        # End symmetric or halfway to P3
+                        end_idx = int(p2 + (spacing // 2))
+
+                        # Bounds check
+                        start_idx = max(0, start_idx)
+                        end_idx = min(len(data.signal), end_idx)
+
+                        # Create Sliced Data for FFT
+                        # We create a temporary NMRData-like object or just pass arrays if compute_spectrum supported it?
+                        # compute_spectrum takes NMRData.
+                        sliced_signal = data.signal[start_idx:end_idx]
+                        sliced_time = data.time[start_idx:end_idx]
+
+                        # Create temp object for FFT
+                        sliced_data = NMRData(time=sliced_time, signal=sliced_signal)
+                        freqs, spect = compute_spectrum(sliced_data)
+                        spec_title_suffix = " (2nd Peak)"
+                    else:
+                        console.print("Fewer than 2 peaks detected. using full signal.")
+                        freqs, spect = compute_spectrum(data)
+                        spec_title_suffix = " (Full)"
 
                     # 2. Fit Time Domain T2* (Standard)
                     console.print("Fitting T2* (Time Domain)...")
@@ -531,10 +719,12 @@ def _run_analysis(
 
                         # Simple spectrum plot
                         fig, ax = plt.subplots(figsize=(10, 6))
-                        ax.plot(freqs, np.abs(spect), color="black")
-                        ax.set_title(f"Spectrum: {target_file.name}")
-                        ax.set_xlabel("Frequency (Hz)")
+                        # Convert to kHz
+                        ax.plot(freqs / 1000.0, np.abs(spect), color="black")
+                        ax.set_title(f"Spectrum: {target_file.name}{spec_title_suffix}")
+                        ax.set_xlabel("Frequency (kHz)")
                         ax.set_ylabel("Magnitude")
+                        ax.set_xlim(-10, 10)
                         ax.grid(True, alpha=0.3)
 
                         plt.savefig(filepath_spec)
@@ -934,42 +1124,82 @@ def _run_analysis(
                     data_full = loader.load(f)
                     data_full.experiment_type = experiment
 
-                    # Preprocess: Find peak, slice, and shift time to 0
-                    # Returns processed_data, tau, amp, peak_info
-                    processed_data, original_tau, amp, peak_info = preprocess_data(
+                    # Preprocess
+                    # For T1, we fundamentally rely on the FILENAME for the delay (tau).
+                    # And the Amplitude should be the Maximum of the signal (First Echo/FID).
+                    # The default 'find_peaks_t1_t2' tries to find 2 peaks to calc tau, which fails for CPMG trains or single-fid files.
+
+                    processed_data, _, _, peak_info = preprocess_data(
                         data_full,
                         smoothing=ANALYSIS_SMOOTHING,
                     )
 
-                    tau = original_tau
-
-                    # Extract sort key and label from filename
+                    # 1. Parse Tau from Filename (Primary Source for T1)
                     import re
 
-                    match = re.search(r"(0_[\d\.]+)", f.stem)
+                    # Try X_XXX or X.XXX or just number
+                    match = re.search(r"(\d+)_(\d+)", f.stem)
                     if match:
-                        label = match.group(1).replace("_", ".")
-                        try:
-                            sort_val = float(label)
-                        except ValueError:
-                            sort_val = tau
+                        tau = float(f"{match.group(1)}.{match.group(2)}")
                     else:
-                        label = f.stem
-                        sort_val = tau
+                        match_num = re.search(r"([\d\.]+)", f.stem)
+                        if match_num:
+                            tau = float(match_num.group(1))
+                            if (
+                                tau > 10000
+                            ):  # Heuristic: if > 10000, maybe it is in microseconds? Or filename is timestamp?
+                                # Assume seconds if small, ms if large?
+                                # Usually filenames are in 'ms' or 's'.
+                                # If filename is "1100" (ms), tau should be 1.1s?
+                                # Repo conventions?
+                                # Users 1100.csv -> 1.1s is likely.
+                                # Just use as is for now, later fit might scale?
+                                # Wait, "1100.csv" -> 1100.
+                                # Is it ms or s?
+                                # If T1 is usually 0.1-5s. 1100s is huge. 1100ms = 1.1s is reasonable.
+                                # Let's assume input is in [ms] if > 10? Or just trust val?
+                                # Let's stick to raw value, but convert to seconds if it looks like ms?
+                                # shoham-b/NMR repo usually uses seconds.
+                                # If user has "1100", it's probably ms.
+                                pass
+                        else:
+                            # Fallback to internal if filename parse fails?
+                            # But internal is risky for CPMG.
+                            tau = 0.0  # Will filter out?
 
+                    # Heuristic for ms -> s conversion
+                    # If tau > 50 and < 100000, assume ms?
+                    if tau > 50:
+                        tau = tau / 1000.0
+
+                    # 2. Extract Amplitude (Max of signal)
+                    # Use processed_data (trimmed/dc-corrected)
+                    # We want the recovery amplitude.
+                    # Ideally: Max Magnitude but Signed (to show Inversion).
+                    # amp = sig[argmax(abs(sig))]
+                    sig = processed_data.signal
+                    amp = sig[np.argmax(np.abs(sig))]
+
+                    # Logic for "trace_label"
+                    label = f.stem
                     data_full.metadata["trace_label"] = label
                     processed_data.metadata["trace_label"] = label
 
-                    delays.append(original_tau)
+                    delays.append(tau)
                     amplitudes.append(amp)
 
                     # Store full raw data for visualization (User Request)
-                    # We pass data_full (untouched) but we also need peak_info to know where peaks are relative to it.
-                    # peak_info contains 'trim_start_idx' which connects processed to full.
-                    # Note: We rely on trim_start_idx to adjust plotting markers.
+                    # Tuple format: (processed_data, t_peak, amp, tau, peak_info, data_full, sort_val)
+                    # - processed_data: NMRData (trimmed, for plotting)
+                    # - t_peak: float (not used for T1/T2, set to 0.0)
+                    # - amp: float (amplitude value)
+                    # - tau: float (delay value)
+                    # - peak_info: dict (contains trim_start_idx, p1_idx, etc.)
+                    # - data_full: NMRData (full untouched data)
+                    # - sort_val: float (for sorting, use tau)
 
                     raw_traces.append(
-                        (processed_data, data_full, 0.0, amp, tau, peak_info, sort_val)
+                        (processed_data, data_full, 0.0, amp, tau, peak_info, tau)
                     )
                 except Exception as e:
                     console.print(f"[yellow]Skipping {f.name}: {e}[/yellow]")
@@ -981,10 +1211,48 @@ def _run_analysis(
             raise typer.Exit(1)
 
         delays = np.array(delays)
+
+        # Phase Correction for T1 (Crucial for Inversion Recovery)
+        # We collected complex peak amplitudes in `amplitudes`?
+        # Check: `amp = sig[np.argmax(np.abs(sig))]` -> `amp` is complex.
+        # Yes, `amplitudes` is a list of complex numbers.
+
         amplitudes = np.array(amplitudes)
         sorted_indices = np.argsort(delays)
         delays = delays[sorted_indices]
         amplitudes = amplitudes[sorted_indices]
+
+        if experiment == ExperimentType.T1:
+            # Find trace with max delay (assumed relaxed)
+            # Last in sorted list
+            ref_amp = amplitudes[-1]
+            ref_phase = np.angle(ref_amp)
+            # We want ref_amp to be Positive Real.
+            # So we rotate by -ref_phase.
+            phase_corr = np.exp(-1j * ref_phase)
+
+            # Apply to all
+            amplitudes_phased = amplitudes * phase_corr
+            # Take Real part
+            amplitudes_fit = np.real(amplitudes_phased)
+
+            console.print(
+                f"Applied T1 Phase Correction (ref_phase={ref_phase:.2f} rad). Range: {np.min(amplitudes_fit):.2e} to {np.max(amplitudes_fit):.2e}"
+            )
+
+            # Heuristic: If T1 data is DECAYING (Slope < 0), it means we likely flipped the sign wrong (e.g. all points were negative).
+            # T1 Recovery should be increasing (Slope > 0).
+            if len(delays) > 1:
+                slope, _ = np.polyfit(delays, amplitudes_fit, 1)
+                if slope < 0:
+                    console.print(
+                        f"Detected decaying T1 data (slope={slope:.2e}). Flipping sign to restore recovery shape."
+                    )
+                    amplitudes_fit = -amplitudes_fit
+
+        else:
+            # T2/Others: Magnitude is usually sufficient (Decay)
+            amplitudes_fit = np.abs(amplitudes)
 
         # raw_traces: (processed, full, t_peak, amp, tau, peak_info, sort_val)
         # Sort by sort_val (index 6)
@@ -993,14 +1261,43 @@ def _run_analysis(
         console.print("Fitting data...")
         if experiment == ExperimentType.T1:
             params, fit_curve, residuals, r2, param_errors = Fitter.fit_t1(
-                delays, amplitudes
+                delays, amplitudes_fit
             )
             dataset_name = "T1 Analysis"
         else:  # T2
-            params, fit_curve, residuals, r2, param_errors = Fitter.fit_t2(
-                delays, amplitudes
-            )
-            dataset_name = "T2 Analysis"
+            # Check for Alcohol (J-Modulated Analysis)
+            # Heuristic: If dataset name ends with "nol" (e.g. Ethanol, Methanol)
+            # Or if user explicitly requested alcohol handling (though we rely on path mostly)
+            # We check path.name or path.parent.name
+            target_name = path.name.lower()
+            parent_name = path.parent.name.lower()
+
+            # Helper to check if any word in a name contains "nol"
+            def _contains_nol_word(name: str) -> bool:
+                # Split on common separators: space, underscore, hyphen
+                words = re.split(r"[\s_\-]+", name)
+                return any("nol" in word for word in words)
+
+            if (
+                target_name.endswith("nol")
+                or "alcohol" in target_name
+                or _contains_nol_word(target_name)
+                or parent_name.endswith("nol")
+                or "alcohol" in parent_name
+                or _contains_nol_word(parent_name)
+            ):
+                console.print(
+                    "[cyan]Alcohol dataset detected: Using J-Modulated T2 Fit[/cyan]"
+                )
+                params, fit_curve, residuals, r2, param_errors = (
+                    Fitter.fit_modulated_t2(delays, amplitudes_fit)
+                )
+                dataset_name = "T2 Analysis (J-Modulated)"
+            else:
+                params, fit_curve, residuals, r2, param_errors = Fitter.fit_t2(
+                    delays, amplitudes_fit
+                )
+                dataset_name = "T2 Analysis"
 
         result = AnalysisResult(
             experiment_type=experiment,
@@ -1036,7 +1333,7 @@ def _run_analysis(
 
             plot_analysis_summary(
                 delays,
-                amplitudes,
+                amplitudes_fit,
                 result,
                 raw_traces,
                 "Delay (s)",
@@ -1045,7 +1342,7 @@ def _run_analysis(
                 smoothing=ANALYSIS_SMOOTHING,
             )
 
-        aggregated_data = NMRData(time=delays, signal=amplitudes)
+        aggregated_data = NMRData(time=delays, signal=amplitudes_fit)
         return [
             AnalysisContext(data=aggregated_data, result=result, raw_traces=raw_traces)
         ]
@@ -1053,10 +1350,12 @@ def _run_analysis(
 
 def plot_spectrum_fit(freqs, mag_data, result, filepath=None):
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(freqs, mag_data, label="Data (Magnitude)", color="black", alpha=0.7)
+    # Convert to kHz
+    freqs_khz = freqs / 1000.0
+    ax.plot(freqs_khz, mag_data, label="Data (Magnitude)", color="black", alpha=0.7)
     if len(result.fit_curve) > 0:
         ax.plot(
-            freqs,
+            freqs_khz,
             result.fit_curve,
             label="Fit (Mag Lorentzian)",
             color="red",
@@ -1066,20 +1365,19 @@ def plot_spectrum_fit(freqs, mag_data, result, filepath=None):
     # Mark peaks
     if "peaks" in result.params:
         for p in result.params["peaks"]:
-            f0 = p["f0"]
+            f0 = p["f0"] / 1000.0
             ax.axvline(f0, color="green", linestyle=":", alpha=0.5)
 
-    ax.set_xlabel("Frequency (Hz)")
+    ax.set_xlabel("Frequency (kHz)")
     ax.set_ylabel("Magnitude")
+    ax.set_xlim(-4, 4)
     ax.set_title(f"{result.dataset_name}")
     ax.legend()
     ax.grid(True, alpha=0.3)
 
     if filepath:
         plt.savefig(filepath)
-        plt.close()
-    else:
-        plt.show()
+    plt.close()
 
 
 def plot_hybrid_result(result: HybridAnalysisResult, out_dir: Path, prefix: str = ""):
@@ -1122,10 +1420,11 @@ def plot_hybrid_result(result: HybridAnalysisResult, out_dir: Path, prefix: str 
     for i, spect in enumerate(spectra_list):
         mag = np.abs(spect)
         color = cmap(i / n_files)
-        ax_freq.plot(freqs, mag + i * offset_step_f, color=color, alpha=0.8)
+        ax_freq.plot(freqs / 1000.0, mag + i * offset_step_f, color=color, alpha=0.8)
 
-    ax_freq.set_xlabel("Frequency (Hz)")
+    ax_freq.set_xlabel("Frequency (kHz)")
     ax_freq.set_ylabel("Magnitude (Stacked)")
+    ax_freq.set_xlim(-10, 10)
     ax_freq.set_title(f"Stacked Spectra")
     ax_freq.grid(True, alpha=0.3)
 
@@ -1155,35 +1454,38 @@ def plot_hybrid_result(result: HybridAnalysisResult, out_dir: Path, prefix: str 
         )
 
         t_smooth = np.linspace(min(taus), max(taus), 200)
-        if fit_res.get("T2", 0) > 0:
+        if fit_res.get("T1", 0) > 0:
+            # T1 Fit Visualization
+            from nmr_analysis.analysis.models import t1_model
+
+            y_fit = t1_model(t_smooth, fit_res["M0"], fit_res["T1"], fit_res["alpha"])
+            ax_lin.plot(t_smooth, y_fit, "r--", label="Fit T1", linewidth=2, zorder=2)
+
+            # Right Plot for T1: Also Linear usually!
+            # Mirror Left plot or show residuals or just Linear Fit again
+            ax_log = axes[k, 1]
+            ax_log.scatter(
+                taus, areas, label="Integrated Area", color="blue", s=50, zorder=3
+            )
+            ax_log.plot(t_smooth, y_fit, "r--", label="Fit T1", linewidth=2, zorder=2)
+
+            val = fit_res["T1"]
+            r2 = fit_res.get("r_squared", 0)
+            text_str = rf"$T_1 = {val:.4f}$ s" + "\n" + rf"$R^2 = {r2:.4f}$"
+
+            ax_log.set_yscale("linear")
+            ax_log.set_ylabel("Integrated Area")
+            ax_log.set_title(f"Peak @ {f0:.1f} Hz (Linear T1)")
+
+        elif fit_res.get("T2", 0) > 0:
             y_fit = t2_decay_model(
                 t_smooth, fit_res["M0"], fit_res["T2"], fit_res["offset"]
             )
             ax_lin.plot(t_smooth, y_fit, "r--", label="Fit", linewidth=2, zorder=2)
 
-        ax_lin.set_xlabel("Delay $\\tau$ (s)")
-        ax_lin.set_ylabel("Integrated Area (Frequency Domain)")
-        ax_lin.set_title(f"Peak @ {f0:.1f} Hz (Linear)")
-        ax_lin.grid(True, alpha=0.5)
-        ax_lin.legend(loc="best")
-
-        # Right: Log
-        ax_log = axes[k, 1]
-        valid_mask = areas > 0
-        ax_log.scatter(
-            taus[valid_mask],
-            areas[valid_mask],
-            label="Integrated Area",
-            color="blue",
-            s=50,
-            zorder=3,
-        )
-
-        if fit_res.get("T2", 0) > 0:
-            y_fit_log = t2_decay_model(
-                t_smooth, fit_res["M0"], fit_res["T2"], fit_res["offset"]
-            )
-            # Filter non-positive for log plot
+            # Right: Log
+            ax_log = axes[k, 1]
+            y_fit_log = y_fit
             valid_y = y_fit_log > 0
             ax_log.plot(
                 t_smooth[valid_y],
@@ -1198,6 +1500,13 @@ def plot_hybrid_result(result: HybridAnalysisResult, out_dir: Path, prefix: str 
             val = fit_res["T2"]
             r2 = fit_res.get("r_squared", 0)
             text_str = rf"$T_2 = {val:.4f}$ s" + "\n" + rf"$R^2 = {r2:.4f}$"
+
+            ax_log.set_yscale("log")
+            ax_log.set_ylabel("Integrated Area (Log)")
+            ax_log.set_title(f"Peak @ {f0:.1f} Hz (Log)")
+
+        # Common Text Box for Right Plot
+        if fit_res.get("T1", 0) > 0 or fit_res.get("T2", 0) > 0:
             ax_log.text(
                 0.95,
                 0.95,
@@ -1209,10 +1518,7 @@ def plot_hybrid_result(result: HybridAnalysisResult, out_dir: Path, prefix: str 
                 bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
             )
 
-        ax_log.set_yscale("log")
         ax_log.set_xlabel("Delay $\\tau$ (s)")
-        ax_log.set_ylabel("Integrated Area (Log)")
-        ax_log.set_title(f"Peak @ {f0:.1f} Hz (Log)")
         ax_log.grid(True, which="both", alpha=0.5)
 
     fig_fit.suptitle(f"T2 Decay Analysis: {result.dataset_name}", fontsize=16)
@@ -1334,9 +1640,18 @@ def plot_result(
         )
 
     ax_log.set_xlabel(xlabel)
-    ax_log.set_ylabel(f"{ylabel} (Log)")
-    ax_log.set_title(f"{result.dataset_name} (Log Scale)")
-    ax_log.set_yscale("log")
+
+    # Check if we should log scale or linear scale
+    # T2* is usually decay, so Log is fine.
+    # But if T1, linear.
+    if "T1" in result.params:
+        ax_log.set_ylabel(ylabel)
+        ax_log.set_title(f"{result.dataset_name} (Fit)")
+        ax_log.set_yscale("linear")
+    else:
+        ax_log.set_ylabel(f"{ylabel} (Log)")
+        ax_log.set_title(f"{result.dataset_name} (Log Scale)")
+        ax_log.set_yscale("log")
 
     # Heuristic for ylim
     valid_y = y[y > 0]
@@ -1366,9 +1681,7 @@ def plot_result(
     plt.tight_layout()
     if filepath:
         plt.savefig(filepath)
-        plt.close()
-    else:
-        plt.show()
+    plt.close()
 
 
 def plot_combined_t2(
@@ -1513,31 +1826,36 @@ def plot_combined_t2(
     plt.tight_layout()
     if filepath:
         plt.savefig(filepath)
-        plt.close()
-    else:
-        plt.show()
+    plt.close()
 
 
 def plot_stacked_traces(
     raw_traces: List[Tuple[NMRData, NMRData, float, float, float, dict, float]],
     filepath: Optional[Path] = None,
     smoothing: float = 1.0,
+    show_fourier: bool = False,
 ):
     """
-    Plot processed traces (left) and full raw traces (right), stacked vertically.
+    Plot processed traces (left), full raw traces (middle), and optionally Fourier transform (right), stacked vertically.
+
+    Args:
+        raw_traces: List of trace data tuples
+        filepath: Optional path to save the plot
+        smoothing: Smoothing parameter (not used for Fourier)
+        show_fourier: If True, show 3 columns with Fourier transform; if False, show 2 columns (legacy)
     """
     num_traces = len(raw_traces)
     if num_traces == 0:
         return
 
     fig_height = max(6, num_traces * 3)
-    # Create 2 columns: Processed (left) and Raw (right)
-    # Different x-axes
-    fig, axes = plt.subplots(num_traces, 2, figsize=(16, fig_height))
+    # Create 2 or 3 columns based on show_fourier flag
+    num_cols = 3 if show_fourier else 2
+    fig, axes = plt.subplots(num_traces, num_cols, figsize=(8 * num_cols, fig_height))
 
     # Handle single trace case
     if num_traces == 1:
-        axes = axes.reshape(1, 2)
+        axes = axes.reshape(1, num_cols)
 
     cmap = cm.viridis
     norm = plt.Normalize(0, num_traces - 1 if num_traces > 1 else 1)
@@ -1545,14 +1863,18 @@ def plot_stacked_traces(
     for i, (processed_data, data_full, t_peak, amp, tau, peak_info, *_) in enumerate(
         raw_traces
     ):
-        ax_proc = axes[i, 0]  # Left column: Processed
-        ax_raw = axes[i, 1]  # Right column: Full Raw
+        # Skip invalid trace data (e.g. from failed analysis)
+        if not hasattr(processed_data, "signal") or not hasattr(data_full, "signal"):
+            continue
+
+        ax_proc = axes[i, 0]  # Column 1: Processed
+        ax_raw = axes[i, 1]  # Column 2: Full Raw
         color = cmap(norm(i))
 
         proc_signal = np.abs(processed_data.signal)
         full_signal = np.abs(data_full.signal)
 
-        # --- LEFT: Processed Data with Peaks ---
+        # --- COLUMN 1: Processed Data with Peaks ---
         ax_proc.plot(
             processed_data.time, proc_signal, color=color, alpha=0.8, linewidth=1.2
         )
@@ -1592,7 +1914,7 @@ def plot_stacked_traces(
 
         ax_proc.legend(loc="best", fontsize=8)
 
-        # --- RIGHT: Full Raw Data ---
+        # --- COLUMN 2: Full Raw Data ---
         ax_raw.plot(data_full.time, full_signal, color=color, alpha=0.9, linewidth=1.5)
 
         # Mark peaks on Full Raw (Absolute indices)
@@ -1627,10 +1949,33 @@ def plot_stacked_traces(
             unit = data_full.metadata.get("time_unit", "s")
             ax_raw.set_title(f"Full Raw Trace {i + 1}")
 
+        # --- COLUMN 3: Fourier Transform (if enabled) ---
+        if show_fourier:
+            ax_fourier = axes[i, 2]
+
+            # Compute Fourier Transform for Full Raw Data
+            freqs_raw, spect_raw = compute_spectrum(data_full)
+            mag_raw = np.abs(spect_raw)
+
+            if len(freqs_raw) > 0:
+                ax_fourier.plot(
+                    freqs_raw / 1000.0, mag_raw, color=color, alpha=0.9, linewidth=1.5
+                )
+            ax_fourier.set_ylabel("Magnitude")
+            ax_fourier.set_xlim(-10, 10)
+            ax_fourier.grid(True, alpha=0.3)
+
+            if "trace_label" in data_full.metadata:
+                ax_fourier.set_title(f"Fourier: {data_full.metadata['trace_label']}")
+            else:
+                ax_fourier.set_title(f"Fourier Transform {i + 1}")
+
     # Set x-labels only on bottom row
     unit = raw_traces[0][0].metadata.get("time_unit", "s")
     axes[-1, 0].set_xlabel(f"Time ({unit})")
     axes[-1, 1].set_xlabel(f"Time ({unit})")
+    if show_fourier:
+        axes[-1, 2].set_xlabel("Frequency (kHz)")
 
     plt.tight_layout()
     if filepath:
@@ -1649,13 +1994,14 @@ def plot_analysis_summary(
     ylabel,
     filepath: Optional[Path] = None,
     smoothing: float = 1.0,
+    show_fourier: bool = False,
 ):
     """
     Plot Fit Result and Raw Traces in a split figure:
     1. Raw Traces (faint) + Smoothed Traces (bold) + Selected Peaks (Overlaid)
-    2. Fit (Log)
+    2. Fit (Log) OR Fourier Transform (if show_fourier=True)
     """
-    fig, (ax_traces, ax_log) = plt.subplots(1, 2, figsize=(16, 6))
+    fig, (ax_traces, ax_right) = plt.subplots(1, 2, figsize=(16, 6))
 
     # Color Mapping
     cmap = cm.viridis
@@ -1664,6 +2010,10 @@ def plot_analysis_summary(
 
     # --- Plot 1: Raw Traces (Time Domain) ---
     for i, (data, t_peak, amp, tau, peak_info, *_) in enumerate(raw_traces):
+        if not hasattr(data, "signal"):
+            # Skip invalid trace data (e.g. from failed analysis)
+            continue
+
         color = cmap(norm(i))
         signal = np.abs(data.signal)
         # Raw trace (faint)
@@ -1714,77 +2064,134 @@ def plot_analysis_summary(
     ax_traces.set_xlabel(f"Time ({raw_traces[0][0].metadata.get('time_unit', 's')})")
     ax_traces.set_ylabel("Signal Amplitude")
     ax_traces.set_title("Raw Traces & Selected Peaks")
-    ax_traces.legend(loc="upper right")
+    # Only add legend if there are labeled artists
+    handles, labels = ax_traces.get_legend_handles_labels()
+    if handles:
+        ax_traces.legend(loc="upper right")
     ax_traces.grid(True, alpha=0.5)
 
     ax_traces.grid(True, alpha=0.5)
 
-    # --- Plot 2: Fit (Log) ---
-    # Plot data points
-    ax_log.scatter(x, y, c="blue", label="Data Points", zorder=3)
+    # --- Plot 2: Fit (Log) OR Fourier Transform ---
+    if show_fourier:
+        # Show stacked Fourier transforms instead of log-scale fit
+        for i, (data, t_peak, amp, tau, peak_info, *extra) in enumerate(raw_traces):
+            color = cmap(norm(i))
 
-    # Fit Curve
-    if result.fit_curve is not None:
-        sorted_pairs = sorted(zip(x, result.fit_curve))
-        sx, sy = zip(*sorted_pairs)
-        ax_log.plot(sx, sy, label="Fit", color="red", linestyle="--", zorder=6)
+            # Get the full raw data if available
+            if len(extra) > 0 and isinstance(extra[0], NMRData):
+                data_full = extra[0]
+            else:
+                data_full = data
 
-    # Add fit annotations with errors
-    if "T1" in result.params:  # T1 Case
-        T1 = result.params["T1"]
-        M0 = result.params["M0"]
-        err_t1 = result.param_errors.get("T1", 0.0)
-        err_m0 = result.param_errors.get("M0", 0.0)
-        text_str = (
-            rf"$T_1 = {T1:.4f} \pm {err_t1:.4f}$ s"
-            + "\n"
-            + rf"$M_0 = {M0:.4e} \pm {err_m0:.4e}$"
-        )
-    elif "T2" in result.params:  # T2 Case
-        T2 = result.params["T2"]
-        M0 = result.params["M0"]
-        err_t2 = result.param_errors.get("T2", 0.0)
-        err_m0 = result.param_errors.get("M0", 0.0)
-        text_str = (
-            rf"$T_2 = {T2:.4f} \pm {err_t2:.4f}$ s"
-            + "\n"
-            + rf"$M_0 = {M0:.4e} \pm {err_m0:.4e}$"
-        )
+            # Compute Fourier Transform
+            freqs, spect = compute_spectrum(data_full)
+            mag = np.abs(spect)
+
+            # Offset for stacking
+            offset = i * (np.max(mag) * 0.3 if len(mag) > 0 else 0)
+
+            if len(freqs) > 0:
+                ax_right.plot(
+                    freqs / 1000.0,
+                    mag + offset,
+                    color=color,
+                    alpha=0.8,
+                    linewidth=1.5,
+                    label=f"τ={tau:.2e} s" if i < 5 else None,  # Limit legend entries
+                )
+
+        ax_right.set_xlabel("Frequency (kHz)")
+        ax_right.set_ylabel("Magnitude (Stacked)")
+        ax_right.set_title("Fourier Transform (Stacked)")
+        ax_right.set_xlim(-10, 10)
+        ax_right.grid(True, alpha=0.3)
+        if num_traces <= 5:
+            ax_right.legend(loc="best", fontsize=8)
     else:
-        text_str = ""
+        # Original log-scale fit plot
+        # Plot data points
+        ax_right.scatter(x, y, c="blue", label="Data Points", zorder=3)
 
-    if text_str:
-        ax_log.text(
-            0.95,
-            0.95,
-            text_str,
-            transform=ax_log.transAxes,
-            fontsize=10,
-            verticalalignment="top",
-            horizontalalignment="right",
-            bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
-        )
+        # Fit Curve
+        if result.fit_curve is not None:
+            sorted_pairs = sorted(zip(x, result.fit_curve))
+            sx, sy = zip(*sorted_pairs)
+            ax_right.plot(sx, sy, label="Fit", color="red", linestyle="--", zorder=6)
 
-    ax_log.set_xlabel(xlabel)
-    ax_log.set_ylabel(f"{ylabel} (Log)")
-    ax_log.set_title(f"{result.dataset_name} (Log Scale)")
-    ax_log.set_yscale("log")
-    ax_log.set_ylim(bottom=1)
-    ax_log.grid(True, which="both", alpha=0.5)
-    ax_log.legend(loc="best")
+        # Add fit annotations with errors
+        if "T1" in result.params:  # T1 Case
+            T1 = result.params["T1"]
+            M0 = result.params["M0"]
+            err_t1 = result.param_errors.get("T1", 0.0)
+            err_m0 = result.param_errors.get("M0", 0.0)
+            text_str = (
+                rf"$T_1 = {T1:.4f} \pm {err_t1:.4f}$ s"
+                + "\n"
+                + rf"$M_0 = {M0:.4e} \pm {err_m0:.4e}$"
+            )
+        elif "T2" in result.params:  # T2 Case
+            T2 = result.params["T2"]
+            M0 = result.params["M0"]
+            err_t2 = result.param_errors.get("T2", 0.0)
+            err_m0 = result.param_errors.get("M0", 0.0)
+            text_str = (
+                rf"$T_2 = {T2:.4f} \pm {err_t2:.4f}$ s"
+                + "\n"
+                + rf"$M_0 = {M0:.4e} \pm {err_m0:.4e}$"
+            )
+            if "J" in result.params:
+                J_val = result.params["J"]
+                err_J = result.param_errors.get("J", 0.0)
+                text_str += "\n" + rf"$J = {J_val:.2f} \pm {err_J:.2f}$ Hz"
+        else:
+            text_str = ""
+
+        if text_str:
+            ax_right.text(
+                0.95,
+                0.95,
+                text_str,
+                transform=ax_right.transAxes,
+                fontsize=10,
+                verticalalignment="top",
+                horizontalalignment="right",
+                bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
+            )
+
+        ax_right.set_xlabel(xlabel)
+
+        if "T1" in result.params:
+            # T1: Linear Scale (best for Inversion Recovery)
+            ax_right.set_ylabel(ylabel)
+            ax_right.set_title(f"{result.dataset_name} (Fit)")
+            ax_right.set_yscale("linear")
+            # Ensure we see 0 if relevant
+            # ax_right.set_ylim(bottom=0) # Optional, depends on data
+        else:
+            # T2: Log Scale
+            ax_right.set_ylabel(f"{ylabel} (Log)")
+            ax_right.set_title(f"{result.dataset_name} (Log Scale)")
+            ax_right.set_yscale("log")
+            ax_right.set_ylim(bottom=1)
+
+        ax_right.grid(True, which="both", alpha=0.5)
+        ax_right.legend(loc="best")
 
     plt.tight_layout()
     if filepath:
         plt.savefig(filepath)
-        plt.close()
-    else:
-        plt.show()
+    plt.close()
 
 
 if __name__ == "__main__":
-    for week in ("4.2",):
+    for week in ("4.2", "5.1"):
+        week_path = Path(rf"H:\My Drive\Lab C\NMR\week{week}")
+        if not week_path.exists():
+            console.print(f"[yellow]Skipping week {week}: directory not found[/yellow]")
+            continue
         analyze(
-            Path(rf"H:\My Drive\Lab C\NMR\week{week}"),
+            week_path,
             experiment=None,
             channel="Channel 1",
             plot=True,
