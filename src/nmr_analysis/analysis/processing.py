@@ -740,48 +740,25 @@ def find_peaks_t1_t2(
         # We search peaks[1:] (skipping unwanted P1 as *target*, but using it as *reference*).
 
         if len(peaks) >= 2:
-            candidates = peaks[1:]
+            # Filter candidates to only peaks within a reasonable time window from P1
+            # This prevents selecting late-time noise floor points.
+            MAX_ECHO_TIME = 0.15  # seconds - typical echo window
 
-            # Reference
             t0 = time[p1_idx]
-            y0 = detection_signal[p1_idx]
-            if y0 <= 0:
-                y0 = 1e-9  # Avoid div by zero
+            candidates_raw = peaks[1:]
 
-            best_idx = -1
-            max_t2 = -1.0
+            # Filter by time window
+            candidates = []
+            for idx in candidates_raw:
+                if time[idx] - t0 <= MAX_ECHO_TIME:
+                    candidates.append(idx)
+            candidates = np.array(candidates) if len(candidates) > 0 else candidates_raw
 
-            for idx in candidates:
-                t_curr = time[idx]
-                y_curr = detection_signal[idx]
-
-                # Calculate T2
-                # y = y0 * exp(-(t-t0)/T2)
-                # ln(y/y0) = -(delta_t)/T2
-                # T2 = -delta_t / ln(y/y0)
-                # T2 = delta_t / (ln(y0) - ln(y))
-
-                if y_curr <= 0:
-                    # Invalid signal (noise floor?) -> Very fast decay -> Small T2
-                    calc_t2 = 0.0
-                elif y_curr >= y0:
-                    # Signal increased? -> Infinite T2 (Growth).
-                    # This is technically "longest decay" (no decay).
-                    # We should prioritize this usually as "Outer Envelope".
-                    calc_t2 = float("inf")
-                else:
-                    delta_t = t_curr - t0
-                    denom = np.log(y0) - np.log(y_curr)
-                    if denom == 0:
-                        calc_t2 = float("inf")
-                    else:
-                        calc_t2 = delta_t / denom
-
-                if calc_t2 > max_t2:
-                    max_t2 = calc_t2
-                    best_idx = idx
-
-            fit_idx = best_idx if best_idx != -1 else candidates[0]
+            # SIMPLIFIED SELECTION: Pick the HIGHEST AMPLITUDE candidate
+            # This is the "outer envelope" approach - highest echo amplitude
+            cand_amps = detection_signal[candidates]
+            best_local_idx = np.argmax(cand_amps)
+            fit_idx = candidates[best_local_idx]
 
         else:
             # Only P1? Fallback to P1 (shouldn't happen with >= 2 check)
@@ -789,6 +766,10 @@ def find_peaks_t1_t2(
 
         tau = time[fit_idx] - time[p1_idx]
         amp = detection_signal[fit_idx]
+
+        print(
+            f"DEBUG find_peaks_t1_t2: peaks={peaks[:10] if len(peaks) > 10 else peaks}, fit_idx={fit_idx}, candidates[:5]={candidates[:5] if len(candidates) > 0 else []}"
+        )
 
         return (
             p1_idx,

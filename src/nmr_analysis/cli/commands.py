@@ -28,23 +28,16 @@ app = typer.Typer()
 console = Console()
 
 
-def _generate_plot_filename(
-    path: Path,
-    experiment: ExperimentType,
-    graph_type: str,
-    prefix: str = "",
-) -> str:
+def _get_week_and_substance(path: Path, prefix: str = "") -> Tuple[str, str]:
     """
-    Generate plot filename in format: {week}_{substance}_T{type}_{graphtype}.png
+    Extract week and substance information from path and prefix.
 
     Args:
         path: The path to the data directory/file being analyzed.
-        experiment: The experiment type (T1, T2, T2_STAR, etc.).
-        graph_type: Type of graph (fit, traces, combined, etc.).
         prefix: Optional prefix (usually week info from parent directory).
 
     Returns:
-        Formatted filename string.
+        Tuple of (week, substance) strings.
     """
     import re
 
@@ -118,6 +111,29 @@ def _generate_plot_filename(
 
     # Clean substance name (remove unwanted characters)
     substance = substance.replace(" ", "-").replace("_", "-")
+
+    return week, substance
+
+
+def _generate_plot_filename(
+    path: Path,
+    experiment: ExperimentType,
+    graph_type: str,
+    prefix: str = "",
+) -> str:
+    """
+    Generate plot filename in format: {week}_{substance}_T{type}_{graphtype}.png
+
+    Args:
+        path: The path to the data directory/file being analyzed.
+        experiment: The experiment type (T1, T2, T2_STAR, etc.).
+        graph_type: Type of graph (fit, traces, combined, etc.).
+        prefix: Optional prefix (usually week info from parent directory).
+
+    Returns:
+        Formatted filename string.
+    """
+    week, substance = _get_week_and_substance(path, prefix)
 
     # Map experiment type to short string
     type_map = {
@@ -478,6 +494,15 @@ def _run_analysis(
                 data = loader.load(target_file)
                 console.print(f"Fitting T2* for {target_file.name}...")
                 result = Fitter.fit_t2_star(data)
+                # Add week/substance to dataset name
+                week, substance = _get_week_and_substance(target_file, prefix)
+                title_prefix = (
+                    f"{week} {substance}".strip()
+                    if week or substance != "mineral-oil"
+                    else ""
+                )
+                if title_prefix:
+                    result.dataset_name = f"{title_prefix} - {result.dataset_name}"
                 # Ensure unique dataset name if multiple
                 if len(target_files) > 1:
                     result.dataset_name = f"{result.dataset_name} ({target_file.stem})"
@@ -583,8 +608,14 @@ def _run_analysis(
                         d, smoothing=ANALYSIS_SMOOTHING
                     )
 
-                    # Extract Amplitude (Max Magnitude)
-                    amp = np.max(np.abs(processed_data.signal))
+                    # Extract Amplitude using SELECTED PEAK from peak_info
+                    # (Consistent with T1/T2 directory path)
+                    fit_idx = peak_info.get("fit_idx", 0)
+                    sig = processed_data.signal
+                    if fit_idx < len(sig):
+                        amp = np.abs(sig[fit_idx])
+                    else:
+                        amp = np.max(np.abs(sig))
 
                     td_delays.append(tau)
                     td_amplitudes.append(amp)
@@ -606,9 +637,19 @@ def _run_analysis(
                 td_delays, td_amplitudes
             )
 
-            # Determine experiment name from directory
+            # Determine experiment name from directory with week/substance
+            week, substance = _get_week_and_substance(path, prefix)
+            title_prefix = (
+                f"{week} {substance}".strip()
+                if week or substance != "mineral-oil"
+                else ""
+            )
             dataset_label = path.name if path.is_dir() else path.parent.name
-            td_name = f"T2 Analysis: {dataset_label}"
+            td_name = (
+                f"{title_prefix} - T2 Analysis: {dataset_label}"
+                if title_prefix
+                else f"T2 Analysis: {dataset_label}"
+            )
 
             td_result = AnalysisResult(
                 experiment_type=ExperimentType.T2,
@@ -644,6 +685,7 @@ def _run_analysis(
                     filepath=filepath_traces,
                     smoothing=ANALYSIS_SMOOTHING,
                     show_fourier=True,
+                    title=td_result.dataset_name,
                 )
 
                 plot_analysis_summary(
@@ -1170,9 +1212,19 @@ def _run_analysis(
             peak_times, peak_amps
         )
 
+        # Add week/substance to dataset name
+        week, substance = _get_week_and_substance(path, prefix)
+        title_prefix = (
+            f"{week} {substance}".strip() if week or substance != "mineral-oil" else ""
+        )
+        combined_name = (
+            f"{title_prefix} - Spin Echo (Echo Train)"
+            if title_prefix
+            else "Spin Echo (Echo Train)"
+        )
         result = AnalysisResult(
             experiment_type=experiment,
-            dataset_name="Spin Echo (Echo Train)",
+            dataset_name=combined_name,
             params=params,
             fit_curve=fit_curve,
             residuals=residuals,
@@ -1382,7 +1434,15 @@ def _run_analysis(
             params, fit_curve, residuals, r2, param_errors = Fitter.fit_t1(
                 delays, amplitudes_fit
             )
-            dataset_name = "T1 Analysis"
+            week, substance = _get_week_and_substance(path, prefix)
+            title_prefix = (
+                f"{week} {substance}".strip()
+                if week or substance != "mineral-oil"
+                else ""
+            )
+            dataset_name = (
+                f"{title_prefix} - T1 Analysis" if title_prefix else "T1 Analysis"
+            )
         else:  # T2
             # Check for Alcohol (J-Modulated Analysis)
             # Heuristic: If dataset name ends with "nol" (e.g. Ethanol, Methanol)
@@ -1411,12 +1471,30 @@ def _run_analysis(
                 params, fit_curve, residuals, r2, param_errors = (
                     Fitter.fit_modulated_t2(delays, amplitudes_fit)
                 )
-                dataset_name = "T2 Analysis (J-Modulated)"
+                week, substance = _get_week_and_substance(path, prefix)
+                title_prefix = (
+                    f"{week} {substance}".strip()
+                    if week or substance != "mineral-oil"
+                    else ""
+                )
+                dataset_name = (
+                    f"{title_prefix} - T2 Analysis (J-Modulated)"
+                    if title_prefix
+                    else "T2 Analysis (J-Modulated)"
+                )
             else:
                 params, fit_curve, residuals, r2, param_errors = Fitter.fit_t2(
                     delays, amplitudes_fit
                 )
-                dataset_name = "T2 Analysis"
+                week, substance = _get_week_and_substance(path, prefix)
+                title_prefix = (
+                    f"{week} {substance}".strip()
+                    if week or substance != "mineral-oil"
+                    else ""
+                )
+                dataset_name = (
+                    f"{title_prefix} - T2 Analysis" if title_prefix else "T2 Analysis"
+                )
 
         result = AnalysisResult(
             experiment_type=experiment,
@@ -1446,6 +1524,7 @@ def _run_analysis(
                 raw_traces,
                 filepath=filepath_traces,
                 smoothing=ANALYSIS_SMOOTHING,
+                title=result.dataset_name,
             )
 
             plot_analysis_summary(
@@ -1970,15 +2049,17 @@ def plot_stacked_traces(
     filepath: Optional[Path] = None,
     smoothing: float = 1.0,
     show_fourier: bool = False,
+    title: str = "",
 ):
     """
     Plot processed traces (left), full raw traces (middle), and optionally Fourier transform (right), stacked vertically.
 
     Args:
-        raw_traces: List of trace data tuples
+        raw_traces: List of trace data tuples (processed_data, data_full, t_peak, amp, tau, peak_info, sort_val)
         filepath: Optional path to save the plot
         smoothing: Smoothing parameter (not used for Fourier)
         show_fourier: If True, show 3 columns with Fourier transform; if False, show 2 columns (legacy)
+        title: Optional title to display as suptitle
     """
     num_traces = len(raw_traces)
     if num_traces == 0:
@@ -1996,7 +2077,7 @@ def plot_stacked_traces(
     cmap = cm.viridis
     norm = plt.Normalize(0, num_traces - 1 if num_traces > 1 else 1)
 
-    for i, (processed_data, t_peak, amp, tau, peak_info, data_full, *_) in enumerate(
+    for i, (processed_data, data_full, t_peak, amp, tau, peak_info, *_) in enumerate(
         raw_traces
     ):
         # Skip invalid trace data (e.g. from failed analysis)
@@ -2113,6 +2194,10 @@ def plot_stacked_traces(
     if show_fourier:
         axes[-1, 2].set_xlabel("Frequency (kHz)")
 
+    # Add main title if provided
+    if title:
+        plt.suptitle(title, fontsize=14, y=1.02)
+
     plt.tight_layout()
     if filepath:
         plt.savefig(filepath)
@@ -2175,24 +2260,23 @@ def plot_analysis_summary(
                     edgecolors="black",
                 )
 
-        trim_offset = peak_info.get("trim_start_idx", 0)
+        # NOTE: `data` here is `processed_data` which is ALREADY TRIMMED.
+        # peak_info indices are relative to this trimmed data.
+        # Do NOT add trim_offset when indexing into `data`.
 
-        # P1 (Start)
-        p1_idx_rel = peak_info.get("p1_idx", 0)
-        p1_idx = trim_offset + p1_idx_rel
+        # P1 (Start) - should be at t=0 (index 0) for trimmed data
+        p1_idx = peak_info.get("p1_idx", 0)
         mark_peak(p1_idx, "cyan", "o", "P1 (Start)")
 
-        # P2 (Noise)
-        p2_idx_rel = peak_info.get("p2_idx", -1)
-        if p2_idx_rel != -1:
-            p2_idx = trim_offset + p2_idx_rel
-            if p2_idx >= p1_idx:
-                mark_peak(p2_idx, "red", "X", "P2 (Ignored)")
+        # P2 (Noise) - optional
+        p2_idx = peak_info.get("p2_idx", -1)
+        if p2_idx != -1 and p2_idx >= p1_idx:
+            mark_peak(p2_idx, "red", "X", "P2 (Ignored)")
 
         # P3 (Fit) or P2 (Fit) - Green Star
         # We use 'fit_idx' from peak_info which tells us WHICH peak was used.
-        fit_idx_rel = peak_info.get("fit_idx", peak_info.get("p3_idx", 0))
-        fit_idx = trim_offset + fit_idx_rel
+        # No trim_offset needed - indices are relative to processed_data
+        fit_idx = peak_info.get("fit_idx", peak_info.get("p3_idx", 0))
 
         if fit_idx >= p1_idx:
             mark_peak(fit_idx, "lime", "*", "Fit Peak")
