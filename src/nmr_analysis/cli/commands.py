@@ -669,6 +669,89 @@ def montage(
 
     console.print(f"[bold green]Montage generated successfully![/bold green]")
 
+    # --- NEW: T2 vs Ethanol Percentage Graph ---
+    console.print("[cyan]Generating T2 vs Ethanol Percentage graph...[/cyan]")
+
+    # Collect data for T2 vs Percent
+    # Group by Week to allow multiple series if needed (though usually one series per folder)
+    # results are already sorted by week then percent
+
+    # Structure: { "WeekName": [(percent, t2, error), ...] }
+    series_data = {}
+
+    for res in results:
+        week = res["week"]
+        percent = res["percent"]
+        ctx = res["context"]
+
+        try:
+            t2_val = ctx.result.params.get("T2", None)
+            # Try to get error if available (standard error)
+            t2_err = ctx.result.errors.get("T2", 0.0) if ctx.result.errors else 0.0
+
+            if t2_val is not None:
+                if week not in series_data:
+                    series_data[week] = []
+                series_data[week].append((percent, t2_val, t2_err))
+        except Exception:
+            pass
+
+    if not series_data:
+        console.print("[yellow]No T2 data found for correlation graph.[/yellow]")
+        return
+
+    # Plot T2 vs Percent
+    fig2, ax2 = plt.subplots(figsize=(10, 6))
+
+    colors = cm.get_cmap("tab10")  # Use a colormap
+
+    for i, (week, data_points) in enumerate(series_data.items()):
+        # Sort by percent just in case
+        data_points.sort(key=lambda x: x[0])
+
+        percents = [d[0] for d in data_points]
+        t2s = [d[1] for d in data_points]
+        errors = [d[2] for d in data_points]
+
+        label = week if week else "Data"
+
+        ax2.errorbar(
+            percents,
+            t2s,
+            yerr=errors,
+            fmt="o-",
+            linewidth=2,
+            markersize=8,
+            capsize=4,
+            label=label,
+            color=colors(i),
+        )
+
+    ax2.set_xlabel("Ethanol Percentage (%)", fontsize=12, fontweight="bold")
+    ax2.set_ylabel("T2 Relaxation Time (s)", fontsize=12, fontweight="bold")
+    ax2.set_title("T2 vs Ethanol Percentage", fontsize=14, fontweight="bold")
+    ax2.grid(True, linestyle="--", alpha=0.6)
+
+    if len(series_data) > 1:
+        ax2.legend()
+
+    # Construct output filename for this graph
+    # Based on the montage output filename
+    # e.g. ethanol_montage.png -> ethanol_t2_vs_percent.png
+    base_name = output_file.stem
+    if "montage" in base_name:
+        new_name = base_name.replace("montage", "t2_vs_percent")
+    else:
+        new_name = f"{base_name}_t2_vs_percent"
+
+    output_graph_file = output_file.parent / (new_name + output_file.suffix)
+
+    console.print(
+        f"[green]Saving T2 comparison graph to {output_graph_file.resolve()}[/green]"
+    )
+    plt.savefig(output_graph_file, dpi=300)
+    plt.close()
+
 
 def _run_analysis(
     path: Path,
