@@ -2516,6 +2516,70 @@ def plot_analysis_summary(
         if fit_idx >= p1_idx:
             mark_peak(fit_idx, "lime", "*", "Fit Peak")
 
+    # --- Overlay Fit Curve on Raw Traces Plot ---
+    # Extract peak times and fit values to plot the decay envelope
+    if result.fit_curve is not None and len(raw_traces) > 0:
+        # Collect peak times from raw traces (t_peak values)
+        peak_times = []
+        for trace_data in raw_traces:
+            if len(trace_data) >= 2:
+                t_peak = trace_data[1]  # t_peak is the second element
+                peak_times.append(t_peak)
+
+        # Sort and pair with fit curve for proper display
+        if len(peak_times) == len(result.fit_curve):
+            sorted_indices = np.argsort(peak_times)
+            sorted_times = np.array(peak_times)[sorted_indices]
+            sorted_fit = np.array(result.fit_curve)[sorted_indices]
+            ax_traces.plot(
+                sorted_times,
+                sorted_fit,
+                "r--",
+                linewidth=2.5,
+                label="Fit",
+                zorder=10,
+            )
+        elif "J" in result.params:
+            # J-modulated: generate dense fit curve
+            from nmr_analysis.analysis.models import j_modulated_t2
+
+            if len(peak_times) > 0:
+                t_dense = np.linspace(min(peak_times), max(peak_times), 500)
+                M0 = result.params["M0"]
+                T2 = result.params["T2"]
+                J = result.params["J"]
+                offset = result.params.get("offset", 0.0)
+                depth = result.params.get("depth", 1.0)
+                fit_dense = j_modulated_t2(t_dense, M0, T2, J, offset, depth)
+                ax_traces.plot(
+                    t_dense,
+                    fit_dense,
+                    "r--",
+                    linewidth=2.5,
+                    label="Fit",
+                    zorder=10,
+                )
+        elif len(peak_times) > 0 and ("T2" in result.params or "T1" in result.params):
+            # Generate fit curve from model parameters
+            t_dense = np.linspace(min(peak_times), max(peak_times), 500)
+            if "T2" in result.params:
+                M0 = result.params["M0"]
+                T2 = result.params["T2"]
+                offset = result.params.get("offset", 0.0)
+                fit_dense = M0 * np.exp(-t_dense / T2) + offset
+            else:  # T1
+                M0 = result.params["M0"]
+                T1 = result.params["T1"]
+                fit_dense = M0 * (1 - 2 * np.exp(-t_dense / T1))
+            ax_traces.plot(
+                t_dense,
+                fit_dense,
+                "r--",
+                linewidth=2.5,
+                label="Fit",
+                zorder=10,
+            )
+
     ax_traces.set_xlabel(f"Time ({raw_traces[0][0].metadata.get('time_unit', 's')})")
     ax_traces.set_ylabel("Signal Amplitude")
     ax_traces.set_title("Raw Traces & Selected Peaks")
@@ -2523,8 +2587,6 @@ def plot_analysis_summary(
     handles, labels = ax_traces.get_legend_handles_labels()
     if handles:
         ax_traces.legend(loc="upper right")
-    ax_traces.grid(True, alpha=0.5)
-
     ax_traces.grid(True, alpha=0.5)
 
     # --- Plot 2: Fit (Log) OR Fourier Transform ---
