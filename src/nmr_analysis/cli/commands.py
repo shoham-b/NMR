@@ -2289,6 +2289,18 @@ def plot_stacked_traces(
     cmap = cm.viridis
     norm = plt.Normalize(0, num_traces - 1 if num_traces > 1 else 1)
 
+    # Calculate global x-axis limits for normalization
+    proc_xlims = [np.inf, -np.inf]
+    raw_xlims = [np.inf, -np.inf]
+
+    for processed_data, t_peak, amp, tau, peak_info, data_full, *_ in raw_traces:
+        if hasattr(processed_data, "time") and len(processed_data.time) > 0:
+            proc_xlims[0] = min(proc_xlims[0], processed_data.time.min())
+            proc_xlims[1] = max(proc_xlims[1], processed_data.time.max())
+        if hasattr(data_full, "time") and len(data_full.time) > 0:
+            raw_xlims[0] = min(raw_xlims[0], data_full.time.min())
+            raw_xlims[1] = max(raw_xlims[1], data_full.time.max())
+
     for i, (processed_data, t_peak, amp, tau, peak_info, data_full, *_) in enumerate(
         raw_traces
     ):
@@ -2380,6 +2392,12 @@ def plot_stacked_traces(
             unit = data_full.metadata.get("time_unit", "s")
             ax_raw.set_title(f"Full Raw Trace {i + 1}")
 
+        # Apply normalized x-axis limits
+        if proc_xlims[0] != np.inf:
+            ax_proc.set_xlim(proc_xlims)
+        if raw_xlims[0] != np.inf:
+            ax_raw.set_xlim(raw_xlims)
+
         # --- COLUMN 3: Fourier Transform (if enabled) ---
         if show_fourier:
             ax_fourier = axes[i, 2]
@@ -2400,6 +2418,8 @@ def plot_stacked_traces(
                 ax_fourier.set_title(f"Fourier: {data_full.metadata['trace_label']}")
             else:
                 ax_fourier.set_title(f"Fourier Transform {i + 1}")
+
+            # Fourier already has fixed xlim at line 2396
 
     # Set x-labels only on bottom row
     unit = raw_traces[0][0].metadata.get("time_unit", "s")
