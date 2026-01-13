@@ -140,10 +140,10 @@ def _get_week_and_substance(path: Path, prefix: str = "") -> Tuple[str, str]:
 
 
 def _generate_plot_filename(
-        path: Path,
-        experiment: ExperimentType,
-        graph_type: str,
-        prefix: str = "",
+    path: Path,
+    experiment: ExperimentType,
+    graph_type: str,
+    prefix: str = "",
 ) -> str:
     """
     Generate plot filename in format: {week}_{substance}_T{type}_{graphtype}.png
@@ -193,32 +193,32 @@ def gui():
 
 @app.command()
 def analyze(
-        path: Path = typer.Argument(
-            ...,
-            help="Path to input file (T2*), directory (T1/T2/Combined), or root directory for batch.",
-        ),
-        experiment: Optional[ExperimentType] = typer.Option(
-            None,
-            "-t",
-            "--type",
-            help="Type of experiment: t1, t2, t2_star, t2_combined. Auto-detected in batch mode.",
-        ),
-        channel: str = typer.Option("Channel 2", help="Scope channel name"),
-        plot: bool = typer.Option(True, help="Show plot of the fit"),
-        save_plots: bool = typer.Option(
-            False, "--save-plots", help="Save plots to output directory"
-        ),
-        output_dir: Path = typer.Option(
-            Path("output"), "--output-dir", help="Directory to save plots"
-        ),
-        interactive: bool = typer.Option(
-            False, "--interactive", "-i", help="Generate interactive HTML report."
-        ),
-        flat: bool = typer.Option(
-            False,
-            "--flat",
-            help="Save all outputs directly to output directory without subfolders.",
-        ),
+    path: Path = typer.Argument(
+        ...,
+        help="Path to input file (T2*), directory (T1/T2/Combined), or root directory for batch.",
+    ),
+    experiment: Optional[ExperimentType] = typer.Option(
+        None,
+        "-t",
+        "--type",
+        help="Type of experiment: t1, t2, t2_star, t2_combined. Auto-detected in batch mode.",
+    ),
+    channel: str = typer.Option("Channel 2", help="Scope channel name"),
+    plot: bool = typer.Option(True, help="Show plot of the fit"),
+    save_plots: bool = typer.Option(
+        False, "--save-plots", help="Save plots to output directory"
+    ),
+    output_dir: Path = typer.Option(
+        Path("output"), "--output-dir", help="Directory to save plots"
+    ),
+    interactive: bool = typer.Option(
+        False, "--interactive", "-i", help="Generate interactive HTML report."
+    ),
+    flat: bool = typer.Option(
+        False,
+        "--flat",
+        help="Save all outputs directly to output directory without subfolders.",
+    ),
 ):
     """
     Run analysis on NMR data. Supports batch processing of subdirectories.
@@ -371,7 +371,7 @@ def analyze(
                     sub_experiments.sort(
                         key=lambda x: 0
                         if ALIAS_MAP.get(x.name.lower())
-                           in (ExperimentType.T2, "t2", "t2_single")
+                        in (ExperimentType.T2, "t2", "t2_single")
                         else 1
                     )
 
@@ -408,8 +408,8 @@ def analyze(
                             # If Diffusion, pass the T2 from Combined analysis if valid
                             kwargs = {}
                             if (
-                                    exp_type == ExperimentType.DIFFUSION
-                                    and current_sample_t2_combined is not None
+                                exp_type == ExperimentType.DIFFUSION
+                                and current_sample_t2_combined is not None
                             ):
                                 kwargs["fixed_t2"] = current_sample_t2_combined
 
@@ -486,14 +486,14 @@ def analyze(
 
 @app.command()
 def montage(
-        root_dir: Path = typer.Argument(
-            ..., help="Root directory to search for ethanol data"
-        ),
-        output_file: Path = typer.Option(
-            Path("ethanol_montage.png"), "--output", "-o", help="Output filename"
-        ),
-        channel: str = typer.Option("Channel 2", help="Scope channel name"),
-        title: str = typer.Option("Ethanol T2 Fits Montage", help="Title for the montage"),
+    root_dir: Path = typer.Argument(
+        ..., help="Root directory to search for ethanol data"
+    ),
+    output_file: Path = typer.Option(
+        Path("ethanol_montage.png"), "--output", "-o", help="Output filename"
+    ),
+    channel: str = typer.Option("Channel 2", help="Scope channel name"),
+    title: str = typer.Option("Ethanol T2 Fits Montage", help="Title for the montage"),
 ):
     """
     Generate a montage of T2 fits for all ethanol datasets found in the root directory.
@@ -603,7 +603,9 @@ def montage(
     axes = np.ravel(axes)
 
     # Global Title
-    fig.suptitle(title, fontsize=20, fontweight="bold")
+    # Handle case where title might be OptionInfo (when called directly, not via CLI)
+    title_str = title.default if hasattr(title, "default") else str(title)
+    fig.suptitle(title_str, fontsize=20, fontweight="bold")
 
     for i, res in enumerate(results):
         ax = axes[i]
@@ -669,13 +671,13 @@ def montage(
 
 
 def _run_analysis(
-        path: Path,
-        experiment: ExperimentType,
-        channel: str,
-        plot: bool,
-        save_path: Optional[Path] = None,
-        fixed_t2: Optional[float] = None,
-        prefix: str = "",
+    path: Path,
+    experiment: ExperimentType,
+    channel: str,
+    plot: bool,
+    save_path: Optional[Path] = None,
+    fixed_t2: Optional[float] = None,
+    prefix: str = "",
 ) -> List[AnalysisContext]:
     results = []
 
@@ -684,9 +686,9 @@ def _run_analysis(
         target_files = []
         if path.is_dir():
             target_files = (
-                    list(path.glob("*.h5"))
-                    + list(path.glob("*.hdf5"))
-                    + list(path.glob("*.csv"))
+                list(path.glob("*.h5"))
+                + list(path.glob("*.hdf5"))
+                + list(path.glob("*.csv"))
             )
             if not target_files:
                 raise FileNotFoundError(f"No HDF5/CSV files in {path}")
@@ -1114,9 +1116,9 @@ def _run_analysis(
             )
 
         files = (
-                list(path.glob("*.h5"))
-                + list(path.glob("*.hdf5"))
-                + list(path.glob("*.csv"))
+            list(path.glob("*.h5"))
+            + list(path.glob("*.hdf5"))
+            + list(path.glob("*.csv"))
         )
         if not files:
             raise typer.Exit("No files found for diffusion analysis.")
@@ -1240,7 +1242,7 @@ def _run_analysis(
 
             # Plot R2 vs Tau^2
             fig, ax = plt.subplots(figsize=(8, 6))
-            x_vals = result.metadata.get("x_values", taus ** 2)  # Tau^2
+            x_vals = result.metadata.get("x_values", taus**2)  # Tau^2
             y_vals = result.metadata.get("y_values", rates)  # R2
 
             ax.scatter(x_vals, y_vals, label="Data ($1/T_{2,obs}$)", color="blue")
@@ -1288,9 +1290,9 @@ def _run_analysis(
         target_file = path
         if path.is_dir():
             files = (
-                    list(path.glob("*.h5"))
-                    + list(path.glob("*.hdf5"))
-                    + list(path.glob("*.csv"))
+                list(path.glob("*.h5"))
+                + list(path.glob("*.hdf5"))
+                + list(path.glob("*.csv"))
             )
             if not files:
                 raise FileNotFoundError(f"No HDF5/CSV files in {path}")
@@ -1477,9 +1479,9 @@ def _run_analysis(
             raise typer.Exit(1)
 
         files = (
-                list(path.glob(("*.h5")))
-                + list(path.glob(("*.hdf5")))
-                + list(path.glob(("*.csv")))
+            list(path.glob(("*.h5")))
+            + list(path.glob(("*.hdf5")))
+            + list(path.glob(("*.csv")))
         )
         if not files:
             console.print("[red]No .h5, .hdf5 or .csv files found in directory.[/red]")
@@ -1521,7 +1523,7 @@ def _run_analysis(
                         if match_num:
                             tau = float(match_num.group(1))
                             if (
-                                    tau > 10000
+                                tau > 10000
                             ):  # Heuristic: if > 10000, maybe it is in microseconds? Or filename is timestamp?
                                 # Assume seconds if small, ms if large?
                                 # Usually filenames are in 'ms' or 's'.
@@ -1668,12 +1670,12 @@ def _run_analysis(
                 return any("nol" in word for word in words)
 
             if (
-                    target_name.endswith("nol")
-                    or "alcohol" in target_name
-                    or _contains_nol_word(target_name)
-                    or parent_name.endswith("nol")
-                    or "alcohol" in parent_name
-                    or _contains_nol_word(parent_name)
+                target_name.endswith("nol")
+                or "alcohol" in target_name
+                or _contains_nol_word(target_name)
+                or parent_name.endswith("nol")
+                or "alcohol" in parent_name
+                or _contains_nol_word(parent_name)
             ):
                 console.print(
                     "[cyan]Alcohol dataset detected: Using J-Modulated T2 Fit[/cyan]"
@@ -1787,10 +1789,10 @@ def plot_spectrum_fit(freqs, mag_data, result, filepath=None):
 
 
 def plot_hybrid_result(
-        result: HybridAnalysisResult,
-        out_dir: Path,
-        source_path: Optional[Path] = None,
-        prefix: str = "",
+    result: HybridAnalysisResult,
+    out_dir: Path,
+    source_path: Optional[Path] = None,
+    prefix: str = "",
 ):
     """
     Generate plots for Hybrid Analysis:
@@ -1999,7 +2001,7 @@ def print_result(result: AnalysisResult):
 
 
 def plot_result(
-        x, y, result: AnalysisResult, xlabel, ylabel, filepath: Optional[Path] = None
+    x, y, result: AnalysisResult, xlabel, ylabel, filepath: Optional[Path] = None
 ):
     """
     Plot Fit Result for T2* in split view:
@@ -2110,13 +2112,13 @@ def plot_result(
 
 
 def plot_combined_t2(
-        data: NMRData,
-        peak_times: np.ndarray,
-        peak_amps: np.ndarray,
-        result: AnalysisResult,
-        filepath: Optional[Path] = None,
-        excluded_times: Optional[np.ndarray] = None,
-        excluded_amps: Optional[np.ndarray] = None,
+    data: NMRData,
+    peak_times: np.ndarray,
+    peak_amps: np.ndarray,
+    result: AnalysisResult,
+    filepath: Optional[Path] = None,
+    excluded_times: Optional[np.ndarray] = None,
+    excluded_amps: Optional[np.ndarray] = None,
 ):
     """
     Plot T2 Combined analysis results (Echo Train Decay).
@@ -2190,9 +2192,9 @@ def plot_combined_t2(
             err_t2 = result.param_errors.get("T2", 0.0)
             err_m0 = result.param_errors.get("M0", 0.0)
             text_str = (
-                    rf"$T_2 = {T2:.4f} \pm {err_t2:.4f}$ {unit}"
-                    + "\n"
-                    + rf"$M_0 = {M0:.4e} \pm {err_m0:.4e}$"
+                rf"$T_2 = {T2:.4f} \pm {err_t2:.4f}$ {unit}"
+                + "\n"
+                + rf"$M_0 = {M0:.4e} \pm {err_m0:.4e}$"
             )
 
             ax1.text(
@@ -2255,11 +2257,11 @@ def plot_combined_t2(
 
 
 def plot_stacked_traces(
-        raw_traces: List[Tuple[NMRData, NMRData, float, float, float, dict, float]],
-        filepath: Optional[Path] = None,
-        smoothing: float = 1.0,
-        show_fourier: bool = False,
-        title: str = "",
+    raw_traces: List[Tuple[NMRData, NMRData, float, float, float, dict, float]],
+    filepath: Optional[Path] = None,
+    smoothing: float = 1.0,
+    show_fourier: bool = False,
+    title: str = "",
 ):
     """
     Plot processed traces (left), full raw traces (middle), and optionally Fourier transform (right), stacked vertically.
@@ -2288,7 +2290,7 @@ def plot_stacked_traces(
     norm = plt.Normalize(0, num_traces - 1 if num_traces > 1 else 1)
 
     for i, (processed_data, t_peak, amp, tau, peak_info, data_full, *_) in enumerate(
-            raw_traces
+        raw_traces
     ):
         # Skip invalid trace data (e.g. from failed analysis)
         if not hasattr(processed_data, "signal") or not hasattr(data_full, "signal"):
@@ -2417,15 +2419,15 @@ def plot_stacked_traces(
 
 
 def plot_analysis_summary(
-        x,
-        y,
-        result: AnalysisResult,
-        raw_traces: List[Tuple[NMRData, float, float, float, np.ndarray]],
-        xlabel,
-        ylabel,
-        filepath: Optional[Path] = None,
-        smoothing: float = 1.0,
-        show_fourier: bool = False,
+    x,
+    y,
+    result: AnalysisResult,
+    raw_traces: List[Tuple[NMRData, float, float, float, np.ndarray]],
+    xlabel,
+    ylabel,
+    filepath: Optional[Path] = None,
+    smoothing: float = 1.0,
+    show_fourier: bool = False,
 ):
     """
     Plot Fit Result and Raw Traces in a split figure:
@@ -2556,9 +2558,9 @@ def plot_analysis_summary(
             err_t1 = result.param_errors.get("T1", 0.0)
             err_m0 = result.param_errors.get("M0", 0.0)
             text_str = (
-                    rf"$T_1 = {T1:.4f} \pm {err_t1:.4f}$ s"
-                    + "\n"
-                    + rf"$M_0 = {M0:.4e} \pm {err_m0:.4e}$"
+                rf"$T_1 = {T1:.4f} \pm {err_t1:.4f}$ s"
+                + "\n"
+                + rf"$M_0 = {M0:.4e} \pm {err_m0:.4e}$"
             )
         elif "T2" in result.params:  # T2 Case
             T2 = result.params["T2"]
@@ -2566,9 +2568,9 @@ def plot_analysis_summary(
             err_t2 = result.param_errors.get("T2", 0.0)
             err_m0 = result.param_errors.get("M0", 0.0)
             text_str = (
-                    rf"$T_2 = {T2:.4f} \pm {err_t2:.4f}$ s"
-                    + "\n"
-                    + rf"$M_0 = {M0:.4e} \pm {err_m0:.4e}$"
+                rf"$T_2 = {T2:.4f} \pm {err_t2:.4f}$ s"
+                + "\n"
+                + rf"$M_0 = {M0:.4e} \pm {err_m0:.4e}$"
             )
             if "J" in result.params:
                 J_val = result.params["J"]
@@ -2615,21 +2617,26 @@ def plot_analysis_summary(
 
 
 if __name__ == "__main__":
-    for week in ("4.1", "4.2", "5.1", "5.2",):
-        week_path = Path(rf"H:\My Drive\Lab C\NMR\week{week}")
-        if not week_path.exists():
-            console.print(f"[yellow]Skipping week {week}: directory not found[/yellow]")
-            continue
-        analyze(
-            week_path,
-            experiment=None,
-            channel="Channel 1",
-            plot=True,
-            save_plots=True,
-            output_dir=Path(__file__).parents[3] / "output" / week,
-            interactive=False,
-            flat=True,
-        )
+    # for week in (
+    #     "4.1",
+    #     "4.2",
+    #     "5.1",
+    #     "5.2",
+    # ):
+    #     week_path = Path(rf"H:\My Drive\Lab C\NMR\week{week}")
+    #     if not week_path.exists():
+    #         console.print(f"[yellow]Skipping week {week}: directory not found[/yellow]")
+    #         continue
+        # analyze(
+        #     week_path,
+        #     experiment=None,
+        #     channel="Channel 1",
+        #     plot=True,
+        #     save_plots=True,
+        #     output_dir=Path(__file__).parents[3] / "output" / week,
+        #     interactive=False,
+        #     flat=True,
+        # )
     montage(
         Path(rf"H:\My Drive\Lab C\NMR"),
         output_file=Path(__file__).parents[3] / "output" / "montage",
