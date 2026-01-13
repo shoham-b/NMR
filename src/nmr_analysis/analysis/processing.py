@@ -739,55 +739,103 @@ def find_peaks_t1_t2(
         # T2 = -(t - t0) / ln(y / y0)
         # We search peaks[1:] (skipping unwanted P1 as *target*, but using it as *reference*).
 
-        if len(peaks) >= 2:
-            # Filter candidates to only peaks within a reasonable time window from P1
-            MAX_ECHO_TIME = 0.15  # seconds - typical echo window
+        if len(peaks) > 0:
+            # --- NEW LOGIC: Scan ALL points (not just peaks) for "Slowest Decay" ---
+            # User Constraint: "single point that applying exponential decay make the least"
+            # User Constraint: "at least 5% of signal length after it"
 
+            MAX_ECHO_TIME = 0.15  # seconds
+            p1_idx = peaks[
+                0
+            ]  # P1 is determined by find_peaks (guided by preprocessing)
             t0 = time[p1_idx]
+            y0 = detection_signal[p1_idx]
+            if y0 <= 0:
+                y0 = 1e-9
+
             total_duration = time[-1] - time[0]
-            min_separation = (
-                0.05 * total_duration
-            )  # User Request: at least 5% of signal length
+            min_sep_time = 0.05 * total_duration
 
-            candidates_raw = peaks  # Search ALL peaks for candidates after P1
+            # Create mask for valid search window
+            # strictly after P1, separated by 5%, within 0.15s
+            mask_valid = (time > t0 + min_sep_time) & (time <= t0 + MAX_ECHO_TIME)
+            valid_indices = np.where(mask_valid)[0]
 
-            # Filter by time window AND separation
-            candidates = []
-            for idx in candidates_raw:
-                # Check 1: Must be strictly after P1 (index check)
-                if idx <= p1_idx:
-                    continue
+            if len(valid_indices) > 0:
+                # Vectorized T2 maximization
+                t_cands = time[valid_indices]
+                y_cands = detection_signal[valid_indices]
 
-                t_cand = time[idx]
+                # T2 = (t - t0) / (ln(y0) - ln(y))
+                # We want to MAXIMIZE T2.
+                # Cases:
+                # y >= y0: "Growth" or "No Decay". T2 -> Inf. This is BEST (Outer Envelope).
+                # y <= 0: "Noise/Invalid". T2 -> 0. Worst.
+                # 0 < y < y0: Normal decay.
 
-                # Check 2: Minimum Separation (5% of total time)
-                if t_cand - t0 < min_separation:
-                    continue
+                # Handling y >= y0
+                # If any y >= y0, pick the one with largest t (or just any? largest t implies best envelope?)
+                # Actually, if y >= y0, it means it's higher than P1. The "slowest decay" is Infinite.
+                # We should pick the HIGHEST amplitude point among these?
+                # Or if multiple are infinite, pick the one that sustains it longest?
+                # Let's simplify: Maximize y_cand relative to expected decay.
+                # Effectively, we maximize T2.
 
-                # Check 3: Maximum Time Window (Echo window)
-                if t_cand - t0 > MAX_ECHO_TIME:
-                    continue
+                # Safe Log:
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    # ratio = y0 / y. If y >= y0, ratio <= 1 -> log <= 0.
+                    # If y <= 0, we set T2 = 0 manually.
 
-                candidates.append(idx)
+                    # We utilize the fact that minimizing (ln(y0) - ln(y)) maximizes T2.
+                    # denom = ln(y0/y).
+                    # If y >= y0, denom <= 0.
+                    # If y < y0, denom > 0.
 
-            candidates = np.array(candidates)
+                    # Let's compute manually to handle edge cases cleanly
+                    best_idx = valid_indices[0]
+                    max_t2 = -1.0
 
-            if len(candidates) > 0:
-                # SIMPLIFIED SELECTION: Pick the HIGHEST AMPLITUDE candidate
-                cand_amps = detection_signal[candidates]
-                best_local_idx = np.argmax(cand_amps)
-                fit_idx = candidates[best_local_idx]
+                    # Optimization: Filter out y <= 0 first (noise floor)
+                    # (Unless everything is <= 0?)
+
+                    for i in range(len(valid_indices)):
+                        idx = valid_indices[i]
+                        y = y_cands[i]
+                        t = t_cands[i]
+
+                        if y <= 0:
+                            calc_t2 = 0.0
+                        elif y >= y0:
+                            # Higher than P1? Infinite T2.
+                            # Differentiate by Amplitude?
+                            # If multiple points are > P1, the one with HIGHEST Amplitude is "most outer".
+                            # We map this to a very large number + amplitude buffer
+                            calc_t2 = 1e9 + y
+                        else:
+                            # Normal Decay
+                            denom = np.log(y0) - np.log(y)
+                            if denom == 0:
+                                calc_t2 = 1e9
+                            else:
+                                calc_t2 = (t - t0) / denom
+
+                        if calc_t2 > max_t2:
+                            max_t2 = calc_t2
+                            best_idx = idx
+
+                    fit_idx = best_idx
             else:
-                # No valid candidates after filtering?
-                # Fallback to next peak if available, or just P1
+                # Fallback if no points verify constraints (e.g. very short signal?)
+                # Just take next peak if exists
                 if len(peaks) > 1 and peaks[1] > p1_idx:
                     fit_idx = peaks[1]
                 else:
-                    fit_idx = p1_idx
+                    fit_idx = p1_idx  # Should not happen given we scan ALL points
 
         else:
-            # Only P1? Fallback to P1 (shouldn't happen with >= 2 check)
-            fit_idx = p1_idx
+            # Fallback (should be filtered before)
+            fit_idx = p1_idx if len(peaks) > 0 else 0
+            p1_idx = peaks[0] if len(peaks) > 0 else 0
 
         tau = time[fit_idx] - time[p1_idx]
         amp = detection_signal[fit_idx]
@@ -849,7 +897,7 @@ def preprocess_data(
 
         # Determine strict threshold
         global_max = np.max(signal)
-        threshold = 0.8 * global_max
+        threshold = 0.33 * global_max
 
         # Find peaks with height >= threshold
         # We need basic peak finding here to identify candidates
