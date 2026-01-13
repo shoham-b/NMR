@@ -62,14 +62,47 @@ class Fitter:
         return delays[final_mask], amplitudes[final_mask], final_mask
 
     @staticmethod
+    @staticmethod
+    def _detect_outliers_post_fit(
+        delays: np.ndarray,
+        amplitudes: np.ndarray,
+        fit_func: callable,
+        popt: list,
+        threshold: float = 4.0,
+    ) -> np.ndarray:
+        """
+        Detect outliers based on residuals from a fitted model.
+        Returns: Boolean mask where True indicates an OUTLIER.
+        """
+        # Calculate fit and residuals
+        fit_curve = fit_func(delays, *popt)
+        residuals = amplitudes - fit_curve
+
+        # Robust Noise Estimation (MAD)
+        median_res = np.median(residuals)
+        mad = np.median(np.abs(residuals - median_res))
+        sigma_est = 1.4826 * mad
+
+        if sigma_est == 0:
+            sigma_est = np.std(residuals)
+            if sigma_est == 0:
+                # Perfect fit, no outliers
+                return np.zeros_like(delays, dtype=bool)
+
+        # Deviation from MATCHING curve (residuals)
+        deviation = np.abs(residuals - median_res)
+        outlier_mask = deviation > (threshold * sigma_est)
+
+        return outlier_mask
+
+    @staticmethod
     def fit_t1(
         delays: np.ndarray, amplitudes: np.ndarray
-    ) -> Tuple[dict, np.ndarray, np.ndarray, float, dict]:
+    ) -> Tuple[dict, np.ndarray, np.ndarray, float, dict, np.ndarray]:
         """
         Fit T1 Inversion Recovery data.
-        Returns: params, fit_curve, residuals, r_squared, param_errors
+        Returns: params, fit_curve, residuals, r_squared, param_errors, outlier_mask
         """
-        # Initial guess
         # Initial guess
         M0_guess = np.max(np.abs(amplitudes))
 
@@ -82,10 +115,8 @@ class Fitter:
                     T1_guess = np.max(delays) * 5.0
                 else:
                     # Crosses zero -> T1 is around zero crossing
-                    # Find index closest to zero
                     idx_min = np.argmin(np.abs(amplitudes))
                     # Zero crossing is at t = T1 * ln(2*alpha) approx T1*0.69
-                    # So T1 = t / 0.69
                     T1_guess = delays[idx_min] / 0.693
             else:
                 T1_guess = np.mean(delays)
@@ -94,28 +125,71 @@ class Fitter:
 
         p0 = [M0_guess, T1_guess, 1.0]
 
+        # Stage 1: Initial Fit (All Points)
         try:
-            popt, pcov = curve_fit(t1_model, delays, amplitudes, p0=p0, maxfev=10000)
-            M0, T1, alpha = popt
-            fit_curve = t1_model(delays, *popt)
-            residuals = amplitudes - fit_curve
-            ss_res = np.sum(residuals**2)
-            ss_tot = np.sum((amplitudes - np.mean(amplitudes)) ** 2)
-            r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0.0
-
-            perr = np.sqrt(np.diag(pcov))
-            param_errors = {"M0": perr[0], "T1": perr[1], "alpha": perr[2]}
-
-            return (
-                {"M0": M0, "T1": T1, "alpha": alpha},
-                fit_curve,
-                residuals,
-                r2,
-                param_errors,
-            )
+            # First pass: Robust Fit (soft_l1) if supported by scipy, else default
+            try:
+                popt, pcov = curve_fit(
+                    t1_model, delays, amplitudes, p0=p0, maxfev=10000, loss="soft_l1"
+                )
+            except TypeError:
+                # Fallback for older scipy without loss param? (Unlikely for modern env)
+                popt, pcov = curve_fit(
+                    t1_model, delays, amplitudes, p0=p0, maxfev=10000
+                )
         except (RuntimeError, ValueError) as e:
+            # If standard fit fails, return empty
             print(f"Fit failed: {e}")
-            return {}, np.zeros_like(delays), np.zeros_like(delays), 0.0, {}
+            return (
+                {},
+                np.zeros_like(delays),
+                np.zeros_like(delays),
+                0.0,
+                {},
+                np.zeros_like(delays, dtype=bool),
+            )
+
+        # Stage 2: Detect Outliers (Post-Fit)
+        outlier_mask = Fitter._detect_outliers_post_fit(
+            delays, amplitudes, t1_model, popt, threshold=4.0
+        )
+
+        # Stage 3: Refit check
+        # If we have outliers, refit without them for better accuracy
+        if np.any(outlier_mask) and np.sum(~outlier_mask) > 3:
+            try:
+                # Filter data
+                delays_clean = delays[~outlier_mask]
+                amps_clean = amplitudes[~outlier_mask]
+
+                popt_clean, pcov_clean = curve_fit(
+                    t1_model, delays_clean, amps_clean, p0=popt, maxfev=10000
+                )
+                popt = popt_clean
+                pcov = pcov_clean
+            except (RuntimeError, ValueError):
+                # If refit fails, keep original (robust) fit
+                pass
+
+        # Final Calculation (on ALL points using final params)
+        M0, T1, alpha = popt
+        fit_curve = t1_model(delays, *popt)
+        residuals = amplitudes - fit_curve
+        ss_res = np.sum(residuals**2)
+        ss_tot = np.sum((amplitudes - np.mean(amplitudes)) ** 2)
+        r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0.0
+
+        perr = np.sqrt(np.diag(pcov))
+        param_errors = {"M0": perr[0], "T1": perr[1], "alpha": perr[2]}
+
+        return (
+            {"M0": M0, "T1": T1, "alpha": alpha},
+            fit_curve,
+            residuals,
+            r2,
+            param_errors,
+            outlier_mask,
+        )
 
     @staticmethod
     def fit_t2(
@@ -139,62 +213,85 @@ class Fitter:
                 np.zeros_like(delays, dtype=bool),
             )
 
-        # Remove outliers using semi-log linearity check
-        delays_fit, amplitudes_fit, outlier_mask = Fitter._remove_outliers_semilog(
-            delays, amplitudes
+        # Stage 1: Semi-Log Filter (Pre-filter)
+        # We keep this as an initial cleanup step (esp for wildly wrong points)
+        _, _, semilog_mask_inliers = Fitter._remove_outliers_semilog(
+            delays, amplitudes, threshold=3.0
+        )
+        # semilog_mask_inliers is True for GOOD points
+
+        # Ensure we have enough points
+        if np.sum(semilog_mask_inliers) < 3:
+            semilog_mask_inliers = np.ones_like(delays, dtype=bool)
+
+        # Fit on Pre-filtered data
+        try:
+            delays_s1 = delays[semilog_mask_inliers]
+            amps_s1 = amplitudes[semilog_mask_inliers]
+
+            # Use soft_l1 for initial fit
+            try:
+                popt, pcov = curve_fit(
+                    t2_decay_model, delays_s1, amps_s1, p0=p0, loss="soft_l1"
+                )
+            except TypeError:
+                popt, pcov = curve_fit(t2_decay_model, delays_s1, amps_s1, p0=p0)
+
+        except (RuntimeError, ValueError):
+            # Fallback to fit on everything
+            try:
+                popt, pcov = curve_fit(t2_decay_model, delays, amplitudes, p0=p0)
+            except (RuntimeError, ValueError):
+                return (
+                    {},
+                    np.zeros_like(delays),
+                    np.zeros_like(delays),
+                    0.0,
+                    {},
+                    np.zeros_like(delays, dtype=bool),
+                )
+
+        # Stage 2: Post-Fit Outlier Detection (Refinement)
+        # Detect outliers against the curve from Stage 1
+        outlier_mask = Fitter._detect_outliers_post_fit(
+            delays, amplitudes, t2_decay_model, popt, threshold=4.0
         )
 
-        # If too few points, fallback. But we still want to report the mask if possible?
-        # If fallback implies "keeping everything", we should reset the mask.
-        if len(delays_fit) < 3:
-            delays_fit, amplitudes_fit = delays, amplitudes
-            outlier_mask = np.ones_like(delays, dtype=bool)
+        # Stage 3: Refit with clean data (if meaningful change)
+        if np.any(outlier_mask) and np.sum(~outlier_mask) > 3:
+            try:
+                delays_clean = delays[~outlier_mask]
+                amps_clean = amplitudes[~outlier_mask]
 
-        # Invert the logic: _remove_outliers_semilog returns a mask of KEEP points (inliers).
-        # We want "outlier_mask" to be True for OUTLIERS, usually.
-        # But wait, looking at _remove_outliers_semilog implementation:
-        # It returns (delays[final_mask], amplitudes[final_mask], final_mask)
-        # where final_mask is True for INLIERS.
-        # Let's clarify the variable name. Let's return `inlier_mask` to be unambiguous.
+                popt_clean, pcov_clean = curve_fit(
+                    t2_decay_model, delays_clean, amps_clean, p0=popt, maxfev=10000
+                )
+                popt = popt_clean
+                pcov = pcov_clean
+            except (RuntimeError, ValueError):
+                pass
 
-        inlier_mask = outlier_mask
+        M0, T2, offset = popt
 
-        try:
-            popt, pcov = curve_fit(t2_decay_model, delays_fit, amplitudes_fit, p0=p0)
-            M0, T2, offset = popt
+        # Fit curve on ALL points
+        fit_curve = t2_decay_model(delays, *popt)
+        residuals = amplitudes - fit_curve
 
-            # Fit curve on ALL points (to see deviation)
-            fit_curve = t2_decay_model(delays, *popt)
-            residuals = amplitudes - fit_curve
+        ss_res = np.sum(residuals**2)
+        ss_tot = np.sum((amplitudes - np.mean(amplitudes)) ** 2)
+        r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0.0
 
-            # Simple R2 (on all points or just fitted points? Usually fitting metrics are on fitted points)
-            # But we might want to know how bad the outliers are.
-            # Let's stick to standard returning residuals for everything.
+        perr = np.sqrt(np.diag(pcov))
+        param_errors = {"M0": perr[0], "T2": perr[1], "offset": perr[2]}
 
-            ss_res = np.sum(residuals**2)
-            ss_tot = np.sum((amplitudes - np.mean(amplitudes)) ** 2)
-            r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0.0
-
-            perr = np.sqrt(np.diag(pcov))
-            param_errors = {"M0": perr[0], "T2": perr[1], "offset": perr[2]}
-
-            return (
-                {"M0": M0, "T2": T2, "offset": offset},
-                fit_curve,
-                residuals,
-                r2,
-                param_errors,
-                ~inlier_mask,  # Return True for OUTLIERS
-            )
-        except (RuntimeError, ValueError):
-            return (
-                {},
-                np.zeros_like(delays),
-                np.zeros_like(delays),
-                0.0,
-                {},
-                np.zeros_like(delays, dtype=bool),
-            )
+        return (
+            {"M0": M0, "T2": T2, "offset": offset},
+            fit_curve,
+            residuals,
+            r2,
+            param_errors,
+            outlier_mask,  # True for OUTLIERS
+        )
 
     @staticmethod
     def fit_modulated_t2(

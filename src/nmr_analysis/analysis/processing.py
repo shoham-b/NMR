@@ -776,10 +776,21 @@ def find_peaks_t1_t2(
             noise_threshold = median_val + 4.0 * sigma
 
             total_duration = time[-1] - time[0]
-            min_sep_time = 0.05 * total_duration
+            # OLD: min_sep_time = 0.05 * total_duration (Too large for long traces)
+            # NEW: Fixed small exclusion to skip P1 width (e.g. 2ms)
+            # But keep some scaling if trace is SUPER short?
+            # Max of 1ms or 1%?
+            # Let's use a fixed 3ms buffer. P1 is usually < 1ms.
+            min_sep_time = 0.003
+
+            # MAX_ECHO_TIME = 0.15  # seconds
+            # User Feedback: "Actually the problem is with long echos"
+            # We should scan the WHOLE trace (or at least much longer).
+            # We rely on Noise Threshold to avoid picking end-tail noise.
+            MAX_ECHO_TIME = total_duration
 
             # Create mask for valid search window
-            # strictly after P1, separated by 5%, within 0.15s
+            # strictly after P1, separated by 3ms
             mask_valid = (time > t0 + min_sep_time) & (time <= t0 + MAX_ECHO_TIME)
             valid_indices = np.where(mask_valid)[0]
 

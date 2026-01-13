@@ -1547,7 +1547,7 @@ def _run_analysis(
         # Delays are peak_times
 
         # Re-use T2 fitting logic
-        params, fit_curve, residuals, r2, param_errors = Fitter.fit_t2(
+        params, fit_curve, residuals, r2, param_errors, outlier_mask = Fitter.fit_t2(
             peak_times, peak_amps
         )
 
@@ -1569,6 +1569,7 @@ def _run_analysis(
             residuals=residuals,
             r_squared=r2,
             param_errors=param_errors,
+            metadata={"outlier_mask": outlier_mask},
         )
         print_result(result)
         if plot:
@@ -1789,8 +1790,8 @@ def _run_analysis(
         console.print("Fitting data...")
         outlier_mask = None
         if experiment == ExperimentType.T1:
-            params, fit_curve, residuals, r2, param_errors = Fitter.fit_t1(
-                delays, amplitudes_fit
+            params, fit_curve, residuals, r2, param_errors, outlier_mask = (
+                Fitter.fit_t1(delays, amplitudes_fit)
             )
             week, substance = _get_week_and_substance(path, prefix)
             title_prefix = (
