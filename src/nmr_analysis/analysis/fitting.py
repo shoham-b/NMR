@@ -10,7 +10,7 @@ from nmr_analysis.core.types import NMRData, AnalysisResult, ExperimentType
 class Fitter:
     @staticmethod
     def _remove_outliers_semilog(
-        delays: np.ndarray, amplitudes: np.ndarray, threshold: float = 4.0
+        delays: np.ndarray, amplitudes: np.ndarray, threshold: float = 2.0
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Identify outliers based on semi-log linearity.
@@ -310,7 +310,7 @@ class Fitter:
     def fit_t2_star(
         data: NMRData,
         smoothing: float = 1.0,
-        start_trim_percent: float = 0.09,
+        start_trim_percent: float = 0.06,
         end_trim_buffer_percent: float = 0.05,
     ) -> AnalysisResult:
         """

@@ -953,8 +953,13 @@ def _run_analysis(
                     # Create raw trace tuple for plotting
                     # Format: (processed_data, t_peak, amp, tau, peak_info, data_full, sort_val)
                     processed_data.metadata["trace_label"] = f"{tf.stem}"
+                    processed_data.metadata["trace_label"] = f"{tf.stem}"
+                    t_peak = 0.0
+                    if fit_idx < len(processed_data.time):
+                        t_peak = processed_data.time[fit_idx]
+
                     td_raw_traces.append(
-                        (processed_data, 0.0, amp, tau, peak_info, d, tau)
+                        (processed_data, t_peak, amp, tau, peak_info, d, tau)
                     )
                 except Exception as e:
                     console.print(f"[yellow]Error processing {tf.name}: {e}[/yellow]")
@@ -1709,15 +1714,19 @@ def _run_analysis(
                     # Store full raw data for visualization (User Request)
                     # Tuple format: (processed_data, t_peak, amp, tau, peak_info, data_full, sort_val)
                     # - processed_data: NMRData (trimmed, for plotting)
-                    # - t_peak: float (not used for T1/T2, set to 0.0)
+                    # - t_peak: float (TIME of the peak used for fit)
                     # - amp: float (amplitude value)
                     # - tau: float (delay value)
                     # - peak_info: dict (contains trim_start_idx, p1_idx, etc.)
                     # - data_full: NMRData (full untouched data)
                     # - sort_val: float (for sorting, use tau)
 
+                    t_peak = 0.0
+                    if fit_idx < len(processed_data.time):
+                        t_peak = processed_data.time[fit_idx]
+
                     raw_traces.append(
-                        (processed_data, 0.0, amp, tau, peak_info, data_full, tau)
+                        (processed_data, t_peak, amp, tau, peak_info, data_full, tau)
                     )
                 except Exception as e:
                     console.print(f"[yellow]Skipping {f.name}: {e}[/yellow]")
@@ -2866,9 +2875,13 @@ def plot_analysis_summary(
 
 
 if __name__ == "__main__":
-    for week_path in Path(r"H:\My Drive\Lab C\NMR").iterdir():
-        # week_path = Path(rf"H:\My Drive\Lab C\NMR\week{week}")
-        week = week_path.stem[4:]
+    for week in (
+        "4.1",
+        "4.2",
+        "5.1",
+        "5.2",
+    ):
+        week_path = Path(rf"H:\My Drive\Lab C\NMR\week{week}")
         if not week_path.exists():
             console.print(f"[yellow]Skipping week {week}: directory not found[/yellow]")
             continue
