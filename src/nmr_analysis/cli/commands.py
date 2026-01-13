@@ -448,13 +448,13 @@ def analyze(
                 output_html = output_dir / "index.html"
                 generate_dashboard(collected_contexts, output_html)
                 console.print(
-                    f"[green]Interactive report saved to {output_html}[/green]"
+                    f"[green]Interactive report saved to {output_html.absolute().as_uri()}[/green]"
                 )
 
             if collected_contexts:
                 save_summary_csv(collected_contexts, output_dir)
                 console.print(
-                    f"[green]Summary CSV saved to {output_dir / 'summary.csv'}[/green]"
+                    f"[green]Summary CSV saved to {(output_dir / 'summary.csv').absolute().as_uri()}[/green]"
                 )
             return
 
@@ -481,7 +481,9 @@ def analyze(
     if interactive and ctxs:
         output_html = output_dir / "index.html"
         generate_dashboard(ctxs, output_html)
-        console.print(f"[green]Interactive report saved to {output_html}[/green]")
+        console.print(
+            f"[green]Interactive report saved to {output_html.absolute().as_uri()}[/green]"
+        )
 
 
 @app.command()
@@ -663,11 +665,11 @@ def montage(
     for j in range(i + 1, len(axes)):
         axes[j].axis("off")
 
-    console.print(f"[green]Saving montage to {output_file.resolve()}[/green]")
+    console.print(f"[green]Saving montage to {output_file.absolute().as_uri()}[/green]")
     plt.savefig(output_file, dpi=300)
     plt.close()
 
-    console.print(f"[bold green]Montage generated successfully![/bold green]")
+    console.print("[bold green]Montage generated successfully![/bold green]")
 
     # --- NEW: T2 vs Ethanol Percentage Graph ---
     console.print("[cyan]Generating T2 vs Ethanol Percentage graph...[/cyan]")
@@ -747,7 +749,7 @@ def montage(
     output_graph_file = output_file.parent / (new_name + output_file.suffix)
 
     console.print(
-        f"[green]Saving T2 comparison graph to {output_graph_file.resolve()}[/green]"
+        f"[green]Saving T2 comparison graph to {output_graph_file.absolute().as_uri()}[/green]"
     )
     plt.savefig(output_graph_file, dpi=300)
     plt.close()
@@ -970,9 +972,9 @@ def _run_analysis(
                 filepath_fit = out_dir / fname_fit
                 filepath_traces = out_dir / fname_traces
 
-                console.print(f"Saving fit plot to {filepath_fit}")
+                console.print(f"Saving fit plot to {filepath_fit.absolute().as_uri()}")
                 console.print(
-                    f"Saving traces plot (3 columns: processed, raw, Fourier) to {filepath_traces}"
+                    f"Saving traces plot (3 columns: processed, raw, Fourier) to {filepath_traces.absolute().as_uri()}"
                 )
 
                 plot_stacked_traces(
@@ -1023,7 +1025,6 @@ def _run_analysis(
 
             if plot:
                 out_dir = save_path if save_path else target_files[0].parent
-                prefix_str = f"{prefix}_" if prefix else ""
                 try:
                     plot_hybrid_result(
                         hybrid_res,
@@ -1147,7 +1148,9 @@ def _run_analysis(
                             else f"{target_file.stem}_fit.png"
                         )
                         filepath = out_dir / fname
-                        console.print(f"Saving T2* fit plot to {filepath}")
+                        console.print(
+                            f"Saving T2* fit plot to {filepath.absolute().as_uri()}"
+                        )
 
                         plot_result(
                             data.time,
@@ -1167,7 +1170,9 @@ def _run_analysis(
                             else f"{target_file.stem}_spectrum.png"
                         )
                         filepath_spec = out_dir / fname_spec
-                        console.print(f"Saving Spectrum plot to {filepath_spec}")
+                        console.print(
+                            f"Saving Spectrum plot to {filepath_spec.absolute().as_uri()}"
+                        )
 
                         # Simple spectrum plot
                         fig, ax = plt.subplots(figsize=(10, 6))
@@ -1472,7 +1477,7 @@ def _run_analysis(
                     f"Final peaks for fitting: {len(peak_times)}. Range: {peak_times[0]:.4f} - {peak_times[-1]:.4f} s"
                 )
             else:
-                console.print(f"[red]WARNING: No peaks remaining after trimming![/red]")
+                console.print("[red]WARNING: No peaks remaining after trimming![/red]")
 
         # User Request: "remove the first peak from every fitting data before fit"
         # This applies generally to T2 Combined (Echo Train) analysis.
@@ -1535,7 +1540,7 @@ def _run_analysis(
                     target_file, experiment, "combined", prefix
                 )
                 filepath = save_path / fname
-                console.print(f"Saving plot to {filepath}")
+                console.print(f"Saving plot to {filepath.absolute().as_uri()}")
 
             plot_combined_t2(
                 data,
@@ -1589,7 +1594,7 @@ def _run_analysis(
                     # And the Amplitude should be the Maximum of the signal (First Echo/FID).
                     # The default 'find_peaks_t1_t2' tries to find 2 peaks to calc tau, which fails for CPMG trains or single-fid files.
 
-                    processed_data, _, _, peak_info = preprocess_data(
+                    processed_data, measured_tau, _, peak_info = preprocess_data(
                         data_full,
                         smoothing=ANALYSIS_SMOOTHING,
                     )
@@ -1627,10 +1632,24 @@ def _run_analysis(
                             # But internal is risky for CPMG.
                             tau = 0.0  # Will filter out?
 
+                    # 2. Extract Measured Tau from Data (Peak Position) - Higher Priority for T2
+                    # The filename parsing is often unreliable or mismatches physical reality.
+                    # preprocess_data returns 'measured_tau' as the 2nd return value.
+                    # We should use this if available and valid.
+
                     # Heuristic for ms -> s conversion
                     # If tau > 50 and < 100000, assume ms?
-                    if tau > 50:
-                        tau = tau / 1000.0
+                    # If we have a valid measured_tau (from data peaks), prefer it for T2
+                    # T1 usually relies on filename because finding 2 peaks in recovery is hard/ambiguous visually without fit.
+                    # T2 (Spin Echo) clearly has Pulse and Echo.
+                    if experiment == ExperimentType.T2 and measured_tau > 0:
+                        tau = measured_tau
+                        # Convert ms to s check not needed as measured_tau is from data.time (usually s)
+                    else:
+                        # Fallback to Filename Heuristic
+                        # If tau > 50 and < 100000, assume ms?
+                        if tau > 50:
+                            tau = tau / 1000.0
 
                     # 2. Extract Amplitude (Max of signal)
                     # Use processed_data (trimmed/dc-corrected)
@@ -1812,8 +1831,10 @@ def _run_analysis(
                 )
                 filepath_fit = save_path / fname_fit
                 filepath_traces = save_path / fname_traces
-                console.print(f"Saving fit plot to {filepath_fit}")
-                console.print(f"Saving traces plot to {filepath_traces}")
+                console.print(f"Saving fit plot to {filepath_fit.absolute().as_uri()}")
+                console.print(
+                    f"Saving traces plot to {filepath_traces.absolute().as_uri()}"
+                )
 
             plot_stacked_traces(
                 raw_traces,
@@ -1827,7 +1848,7 @@ def _run_analysis(
                 amplitudes_fit,
                 result,
                 raw_traces,
-                "Delay (s)",
+                "Time (s)",
                 "Amplitude",
                 filepath=filepath_fit,
                 smoothing=ANALYSIS_SMOOTHING,
@@ -1904,7 +1925,7 @@ def plot_hybrid_result(
 
     ax_time.set_xlabel(f"Time ({time_list[0].metadata.get('time_unit', 's')})")
     ax_time.set_ylabel("Signal Amplitude (Stacked)")
-    ax_time.set_title(f"Stacked Time Traces")
+    ax_time.set_title("Stacked Time Traces")
     ax_time.grid(True, alpha=0.3)
 
     # Right: Frequency Spectra
@@ -1921,7 +1942,7 @@ def plot_hybrid_result(
     ax_freq.set_xlabel("Frequency (kHz)")
     ax_freq.set_ylabel("Magnitude (Stacked)")
     ax_freq.set_xlim(-10, 10)
-    ax_freq.set_title(f"Stacked Spectra")
+    ax_freq.set_title("Stacked Spectra")
     ax_freq.grid(True, alpha=0.3)
 
     fig_stack.suptitle(f"Hybrid Analysis Overview: {result.dataset_name}", fontsize=14)
@@ -1938,7 +1959,7 @@ def plot_hybrid_result(
         )
     plt.savefig(out_dir / fname_stack)
     plt.close(fig_stack)
-    console.print(f"Saved {fname_stack}")
+    console.print(f"Saved {(out_dir / fname_stack).absolute().as_uri()}")
 
     # --- 2. T2 Decay Fits ---
     n_peaks = len(result.peak_centers)
@@ -2037,7 +2058,7 @@ def plot_hybrid_result(
         fname_fit = f"{prefix}_t2_decay.png" if prefix else "t2_decay.png"
     plt.savefig(out_dir / fname_fit)
     plt.close(fig_fit)
-    console.print(f"Saved {fname_fit}")
+    console.print(f"Saved {(out_dir / fname_fit).absolute().as_uri()}")
 
 
 def print_result(result: AnalysisResult):
@@ -2477,7 +2498,8 @@ def plot_stacked_traces(
 
         # Apply normalized x-axis limits
         if proc_xlims[0] != np.inf:
-            ax_proc.set_xlim(proc_xlims)
+            # Force start at 0 to avoid negative axis padding confusion
+            ax_proc.set_xlim(left=0, right=max(proc_xlims[1], 1e-9))
         if raw_xlims[0] != np.inf:
             ax_raw.set_xlim(raw_xlims)
 
@@ -2826,11 +2848,11 @@ if __name__ == "__main__":
             plot=True,
             save_plots=True,
             output_dir=Path(__file__).parents[3] / "output" / week,
-            interactive=False,
+            interactive=True,
             flat=True,
         )
     montage(
-        Path(rf"H:\My Drive\Lab C\NMR"),
+        Path(r"H:\My Drive\Lab C\NMR"),
         output_file=Path(__file__).parents[3] / "output" / "montage",
         channel="Channel 1",
     )
