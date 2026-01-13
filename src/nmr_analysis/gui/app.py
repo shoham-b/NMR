@@ -1,5 +1,4 @@
 from nicegui import ui
-import os
 
 
 def main():

@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 from nmr_analysis.analysis.processing import filter_peaks_monotonic_reverse
 
 

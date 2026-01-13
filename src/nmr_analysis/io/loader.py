@@ -211,8 +211,6 @@ class OscilloscopeLoader:
         1. Side-by-Side (DSOX1204G): Metadata in cols 0,1; Data in cols 3,4. Header at row 0.
         2. Vertical (Legacy): Metadata rows, then blank line, then Header.
         """
-        import polars as pl
-        import csv
 
         file_path = Path(file_path)
         if not file_path.exists():
@@ -261,7 +259,7 @@ class OscilloscopeLoader:
             metadata = {}
             with open(file_path, "r", newline="", encoding="utf-8-sig") as f:
                 reader = csv.reader(f)
-                header = next(reader, None)
+                next(reader, None)
                 for row in reader:
                     if len(row) >= 2:
                         key = row[0].strip()

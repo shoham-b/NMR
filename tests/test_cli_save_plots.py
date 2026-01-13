@@ -1,6 +1,5 @@
 import pytest
 from unittest.mock import patch, MagicMock
-from pathlib import Path
 from typer.testing import CliRunner
 from nmr_analysis.cli.commands import app
 from nmr_analysis.core.types import ExperimentType, AnalysisResult, NMRData
@@ -132,7 +131,7 @@ def test_save_plots_default_dir(
     input_dir.mkdir()
     (input_dir / "test2.h5").touch()
 
-    with patch("nmr_analysis.cli.commands.Path.mkdir") as mock_mkdir:
+    with patch("nmr_analysis.cli.commands.Path.mkdir"):
         result = runner.invoke(
             app, ["analyze", str(input_dir), "--type", "t2", "--save-plots"]
         )

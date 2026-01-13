@@ -36,7 +36,6 @@ def test_preprocess_data_metadata_Preserved():
     time = np.linspace(0, 10, 100)
     signal = np.zeros(100)
     signal[50] = 6.0
-    sorted_signal = signal
     data = NMRData(time=time, signal=signal, metadata={"key": "val"})
 
     processed, _, _, _ = preprocess_data(data, smoothing=0, min_height=1.0)

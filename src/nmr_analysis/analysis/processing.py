@@ -35,13 +35,17 @@ def extract_echo_train(
 
     # Robustness: Trim to start from Global Max (Pulse)
     # This aligns with the "Refined ArgMax Trimming"
-    start_idx = np.argmax(signal)
-    signal = signal[start_idx:]
+    # start_idx = np.argmax(signal)
+    # signal = signal[start_idx:]
     # Shift time to be relative to the max
     # Note: data.time might already be shifted if preprocess_data was called.
     # If so, start_idx=0, time[0]=0. No change.
     # If raw, this shifts it.
-    time_slice = time[start_idx:] - time[start_idx]
+    # time_slice = time[start_idx:] - time[start_idx]
+
+    # User feedback: "After trimming everything before P1, P1 should be always 0 and never searched again"
+    # We rely on preprocess_data to have correctly trimmed to P1.
+    time_slice = time
 
     # Now use absolute signal for detection
     detection_signal = np.abs(signal)
@@ -312,7 +316,6 @@ def filter_peaks_time_window(
     sorted_idx_indices = np.argsort(peak_amplitudes)[::-1]
 
     keep_mask = np.ones(len(peak_indices), dtype=bool)
-    peak_times = data.time[peak_indices]
 
     for i in range(len(sorted_idx_indices)):
         idx_curr = sorted_idx_indices[i]
@@ -574,7 +577,7 @@ def find_peaks_t1_t2(
         peaks, _ = find_peaks(
             detection_signal,
             height=dynamic_thresh,
-            distance=200,
+            distance=min_distance,
             prominence=dynamic_thresh,
         )
 
@@ -679,8 +682,7 @@ def find_peaks_t1_t2(
     # --- T2 LOGIC (from NMRMINE t2_analysis.py) ---
     else:
         # Default to T2 behavior
-        # User Request: "Is the absoulte value... It harms the peak finding" -> Use SIGNED signal
-        # detection_signal = np.abs(signal)
+        # User confirmed: Raw Data is NEVER complex. Use Real Signal.
         detection_signal = signal
         # T2 repo doesn't explicitly mention DC offset, just "max_idx = argmax... slice... find_peaks"
 
@@ -694,7 +696,7 @@ def find_peaks_t1_t2(
         peaks, _ = find_peaks(
             detection_signal,
             height=height_threshold,
-            distance=200,
+            distance=min_distance,
             prominence=prominence_val,
         )
 
@@ -801,7 +803,7 @@ def find_peaks_t1_t2(
 
                 for i in range(len(valid_indices)):
                     idx = valid_indices[i]
-                    y = y_cands[i]  # Use Raw Value (Signed)
+                    y = y_cands[i]
                     t = t_cands[i]
 
                     # Threshold Check (User: "above 5") - apply to raw signal
@@ -826,7 +828,7 @@ def find_peaks_t1_t2(
                         max_t2 = calc_t2
                         best_idx = idx
 
-                    fit_idx = best_idx
+                fit_idx = best_idx
             else:
                 # Fallback if no points verify constraints (e.g. very short signal?)
                 # Just take next peak if exists
@@ -878,7 +880,7 @@ def preprocess_data(
         signal_corr = signal - dc_offset
         # 2. Use Absolute Signal for Start Detection
         # "max_idx = np.argmax(abs_signal)"
-        # User Request: "It harms the peak finding" -> Use Signed Signal to find positive peaks
+        # User confirmed: Raw Data is NEVER complex. Use Real Signal.
         detection_signal = signal_corr
         start_idx = np.argmax(detection_signal)
 
@@ -901,12 +903,14 @@ def preprocess_data(
 
         # Determine strict threshold
         global_max = np.max(signal)
-        threshold = 0.33 * global_max
+        # User request: "first peak that is at least half of the maxima"
+        threshold = 0.5 * global_max
 
         # Find peaks with height >= threshold
         # We need basic peak finding here to identify candidates
-        # Use simple parameters as we just want strict dominant peaks
-        t2_peaks, _ = find_peaks(signal, height=threshold, distance=100)
+        # User Request Fix: distance=100 suppressed P1 if P2 was close.
+        # Reduced to 1 to find ALL candidates above threshold.
+        t2_peaks, _ = find_peaks(signal, height=threshold, distance=1)
 
         if len(t2_peaks) > 0:
             # Take the FIRST peak that meets the criteria
@@ -942,11 +946,14 @@ def preprocess_data(
             # Fallback: Just global max if no peaks found (unlikely)
             start_idx = np.argmax(signal)
 
-    # Slice and Shift
+    # Shift Time and Slice (Trim)
+    # User Request: "After trimming everything before P1, P1 should be always 0 and never searched again"
     new_time = time[start_idx:] - time[start_idx]
+    # Guard against precision errors (e.g. -1e-16)
+    new_time[new_time < 0] = 0.0
     new_signal = signal[start_idx:]
 
-    # Create Processed Data (Trimmed)
+    # Create Processed Data (Trimmed -> Shifted)
     processed_data = NMRData(
         time=new_time,
         signal=new_signal,

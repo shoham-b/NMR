@@ -146,7 +146,7 @@ class Fitter:
         # ===== Stage 2: Fit Full J-Modulated Model with Depth =====
         # Use Stage 1 results as initial guesses
         # p0: [M0, T2, J, offset, depth]
-        p0 = [M0_stage1, T2_stage1, guess_J, offset_stage1, 0.5]
+        p0 = [M0_stage1, T2_stage1, guess_J, offset_stage1, 0.9]
 
         try:
             # Bounds: M0>0, T2>0, J>0, offset any, 0<=depth<=1
@@ -269,10 +269,6 @@ class Fitter:
         # Use smoothed data for fitting? User: "also use smoothing for the data"
         t_fit = time[global_start_fit_idx:global_end_fit_idx]
         mag_fit = detection_signal[global_start_fit_idx:global_end_fit_idx]
-
-        print(
-            f"DEBUG: fit_t2_star - len(t_fit)={len(t_fit)}, start={global_start_fit_idx}, end={global_end_fit_idx}"
-        )
 
         # Check for insufficient data points (Need at least 3 for M0, T2, offset)
         if len(t_fit) < 3:

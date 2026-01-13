@@ -1,6 +1,5 @@
 import pytest
-from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import patch
 from nmr_analysis.cli.commands import analyze, ExperimentType
 
 

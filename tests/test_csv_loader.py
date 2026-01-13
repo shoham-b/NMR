@@ -1,5 +1,3 @@
-import pytest
-from pathlib import Path
 import numpy as np
 from nmr_analysis.io.loader import CSVLoader
 

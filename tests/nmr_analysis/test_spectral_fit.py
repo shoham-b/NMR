@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 from nmr_analysis.analysis.fitting import Fitter
 from nmr_analysis.analysis.processing import compute_spectrum
 from nmr_analysis.core.types import NMRData, ExperimentType
@@ -85,7 +84,7 @@ def test_spectral_fit_synthetic():
     # FWHM = 2 * gamma.
     # So 2 * gamma = 1 / (pi * T2) => T2 = 1 / (2 * pi * gamma).
 
-    expected_gamma1 = 1.0 / (np.pi * T2s1) / 2.0  # Wait. FWHM = 1/(pi*T2)
+    1.0 / (np.pi * T2s1) / 2.0  # Wait. FWHM = 1/(pi*T2)
     # expected gamma (HWHM) = FWHM/2 = 1/(2*pi*T2)
 
     derived_t2_1 = p1["t2_star"]

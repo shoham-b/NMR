@@ -157,8 +157,12 @@ def generate_dashboard(contexts: List[AnalysisContext], output_path: Path):
     else:
         fig.update_layout(yaxis3_autorange=True)
 
-    # Save to HTML
-    fig.write_html(str(output_path))
+    # Save to HTML with proper DOCTYPE
+    html_content = fig.to_html(full_html=True, include_plotlyjs=True)
+    # Plotly's output lacks DOCTYPE, prepend it for valid HTML5
+    if not html_content.strip().lower().startswith("<!doctype"):
+        html_content = "<!DOCTYPE html>\n" + html_content
+    output_path.write_text(html_content, encoding="utf-8")
     print(f"Dashboard saved to {output_path}")
 
 
@@ -229,31 +233,52 @@ def _add_traces_for_context(
                 )
 
                 # All Peaks (Gray dots) -> Raw Signals Panel (Col 1)
+                # Note: valid_indices and all_peaks might be indices OR times depending on logic.
+                # Usually `all_peaks` in peak_info from `processing.py` are INDICES.
+                # But for T2 Combined, we might have passed times?
+                # Check type of first element if exists.
                 if len(all_peaks) > 0:
-                    # Ensure all_peaks is a numpy array
-                    all_peaks_array = (
-                        np.array(all_peaks)
-                        if not isinstance(all_peaks, np.ndarray)
-                        else all_peaks
-                    )
+                    all_peaks_array = np.array(all_peaks)
 
-                    smoothed_for_peaks = gaussian_filter1d(
-                        np.abs(rdata.signal), sigma=1.0
-                    )
-                    fig.add_trace(
-                        go.Scatter(
-                            x=rdata.time[all_peaks_array],
-                            y=smoothed_for_peaks[all_peaks_array],
-                            mode="markers",
-                            marker=dict(color="gray", size=5, symbol="circle"),
-                            showlegend=True,
-                            name=f"All Peaks {j + 1}",
-                            visible=False,
-                            hoverinfo="skip",
-                        ),
-                        row=1,
-                        col=1,
-                    )
+                    # Check if integer-like
+                    if np.issubdtype(all_peaks_array.dtype, np.integer) or (
+                        all_peaks_array.dtype.kind == "f"
+                        and np.all(all_peaks_array == all_peaks_array.astype(int))
+                    ):
+                        # Integers -> Use as indices
+                        valid_indices_int = all_peaks_array.astype(int)
+                        # Ensure within bounds
+                        valid_indices_int = valid_indices_int[
+                            valid_indices_int < len(rdata.time)
+                        ]
+
+                        smoothed_for_peaks = gaussian_filter1d(
+                            np.abs(rdata.signal), sigma=1.0
+                        )
+                        fig.add_trace(
+                            go.Scatter(
+                                x=rdata.time[valid_indices_int],
+                                y=smoothed_for_peaks[valid_indices_int],
+                                mode="markers",
+                                marker=dict(color="gray", size=5, symbol="circle"),
+                                showlegend=True,
+                                name=f"All Peaks {j + 1}",
+                                visible=False,
+                                hoverinfo="skip",
+                            ),
+                            row=1,
+                            col=1,
+                        )
+                    else:
+                        # Floats (Times) -> Plot directly on X-axis?
+                        # Or find nearest indices?
+                        # If they are times, we can plot them directly if we know Y.
+                        # But we don't carry the Y values of all_peaks here, only rdata.
+                        # So we must match time to find Y? Or just skip?
+                        # Let's try to match time for T2 Combined if they are times.
+
+                        # For now, safe fallback: Skip if not indices.
+                        pass
 
         # 2. Fit/Decay Data
         # For T2 Combined, we have explicit peak times

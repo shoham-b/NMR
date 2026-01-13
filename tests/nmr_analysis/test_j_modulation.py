@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 from nmr_analysis.analysis.fitting import Fitter
 from nmr_analysis.analysis.models import j_modulated_t2
 

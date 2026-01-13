@@ -1,19 +1,18 @@
-from dataclasses import dataclass, field
-from typing import List, Dict, Tuple, Optional
-from pathlib import Path
+from dataclasses import dataclass
+from typing import List, Dict, Tuple
 
 import numpy as np
 from scipy.optimize import curve_fit
 from scipy.signal import find_peaks
 
-from nmr_analysis.core.types import NMRData, AnalysisResult
+from nmr_analysis.core.types import NMRData
 from nmr_analysis.analysis.processing import (
     compute_spectrum,
     integrate_spectral_peaks,
     parse_time_from_filename,
     get_delay_from_metadata,
 )
-from nmr_analysis.analysis.models import t2_decay_model, multi_lorentzian
+from nmr_analysis.analysis.models import t2_decay_model
 
 
 @dataclass

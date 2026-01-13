@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 from nmr_analysis.analysis.processing import find_peaks_t1_t2
 from nmr_analysis.core.types import NMRData, ExperimentType
 

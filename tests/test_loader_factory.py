@@ -1,5 +1,4 @@
 import pytest
-from pathlib import Path
 from nmr_analysis.io.loader import get_loader, CSVLoader, KeysightLoader
 
 

@@ -1,8 +1,6 @@
 import numpy as np
-import pytest
 from nmr_analysis.analysis.fitting import Fitter
 from nmr_analysis.analysis.models import t1_model, t2_decay_model
-from nmr_analysis.core.types import NMRData, ExperimentType
 
 
 def test_t1_fitting():
@@ -10,7 +8,6 @@ def test_t1_fitting():
     delays = np.linspace(0, 10, 20)
     M0 = 100.0
     T1 = 2.5
-    alpha = 1.0
 
     # M(t) = M0 * (1 - 2 * alpha * exp(-t / T1))
     signal = t1_model(delays, M0, T1)

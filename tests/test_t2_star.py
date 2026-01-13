@@ -1,7 +1,5 @@
 import numpy as np
-import pytest
 from nmr_analysis.analysis.fitting import Fitter
-from nmr_analysis.analysis.models import t2_decay_model
 from nmr_analysis.core.types import NMRData
 
 
@@ -20,7 +18,7 @@ def test_t2_star_fitting_starts_after_peak():
     T2_star = 1.0
 
     # Fill decay part
-    decay_time = time[peak_idx:]
+    time[peak_idx:]
     # Ideally decay starts at time[peak_idx] with value M0.
     # But t2_decay_model usage depends on interpretation. Usually it's M0*exp(-t/T)
     # If we want M0 at t=time[peak_idx], we might need an offset in time or just model the shape.
@@ -44,7 +42,7 @@ def test_t2_star_fitting_starts_after_peak():
     # expected_start_idx = 20 + 0 = 20
 
     n_samples = len(time)
-    tail_length = n_samples - peak_idx
+    n_samples - peak_idx
     expected_start_offset = 0  # int(tail_length * 0.0)
     expected_start_idx = peak_idx + expected_start_offset
 

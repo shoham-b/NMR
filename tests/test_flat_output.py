@@ -1,5 +1,4 @@
 import pytest
-from pathlib import Path
 from typer.testing import CliRunner
 from nmr_analysis.cli.commands import app
 import numpy as np
