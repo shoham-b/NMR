@@ -2578,7 +2578,10 @@ def plot_analysis_summary(
                 T2 = result.params["T2"]
                 J = result.params["J"]
                 offset = result.params.get("offset", 0.0)
-                fit_dense = j_modulated_t2(t_dense, M0, T2, J, offset)
+                depth = result.params.get(
+                    "depth", 1.0
+                )  # Default to full modulation if not present
+                fit_dense = j_modulated_t2(t_dense, M0, T2, J, offset, depth)
                 ax_right.plot(
                     t_dense,
                     fit_dense,

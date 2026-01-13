@@ -114,12 +114,12 @@ class Fitter:
         delays: np.ndarray, amplitudes: np.ndarray, guess_J: float = 7.0
     ) -> Tuple[dict, np.ndarray, np.ndarray, float, dict]:
         """
-        Fit J-Modulated T2 Spin Echo decay using a two-stage approach.
+        Fit J-Modulated T2 Spin Echo decay using a two-stage approach with modulation depth.
 
         Stage 1: Fit simple exponential decay to get T2/M0 estimates.
-        Stage 2: Use Stage 1 results as initial guesses for full J-modulated fit.
+        Stage 2: Use Stage 1 results as initial guesses for full J-modulated fit with depth.
 
-        Model: | M0 * exp(-t/T2) * cos(pi*J*t) | + offset
+        Model: | M0 * exp(-t/T2) * ((1-depth) + depth * cos(pi*J*t)) | + offset
         """
         from nmr_analysis.analysis.models import j_modulated_t2
 
@@ -143,14 +143,15 @@ class Fitter:
             # Fallback to initial guesses if Stage 1 fails
             M0_stage1, T2_stage1, offset_stage1 = M0_guess, T2_guess, offset_guess
 
-        # ===== Stage 2: Fit Full J-Modulated Model =====
+        # ===== Stage 2: Fit Full J-Modulated Model with Depth =====
         # Use Stage 1 results as initial guesses
-        p0 = [M0_stage1, T2_stage1, guess_J, offset_stage1]
+        # p0: [M0, T2, J, offset, depth]
+        p0 = [M0_stage1, T2_stage1, guess_J, offset_stage1, 0.5]
 
         try:
-            # Bounds: M0>0, T2>0, J>0, offset can be anything
-            bounds_min = [0, 0, 0, -np.inf]
-            bounds_max = [np.inf, np.inf, 20.0, np.inf]  # Limit J < 20Hz
+            # Bounds: M0>0, T2>0, J>0, offset any, 0<=depth<=1
+            bounds_min = [0, 0, 0, -np.inf, 0.0]
+            bounds_max = [np.inf, np.inf, 20.0, np.inf, 1.0]
 
             popt, pcov = curve_fit(
                 j_modulated_t2,
@@ -160,8 +161,8 @@ class Fitter:
                 bounds=(bounds_min, bounds_max),
                 maxfev=10000,
             )
-            M0, T2, J, offset = popt
-            fit_curve = j_modulated_t2(delays, *popt)
+            M0, T2, J, offset, depth = popt
+            fit_curve = j_modulated_t2(delays, M0, T2, J, offset, depth)
             residuals = amplitudes - fit_curve
 
             ss_res = np.sum(residuals**2)
@@ -174,10 +175,11 @@ class Fitter:
                 "T2": perr[1],
                 "J": perr[2],
                 "offset": perr[3],
+                "depth": perr[4],
             }
 
             return (
-                {"M0": M0, "T2": T2, "J": J, "offset": offset},
+                {"M0": M0, "T2": T2, "J": J, "offset": offset, "depth": depth},
                 fit_curve,
                 residuals,
                 r2,

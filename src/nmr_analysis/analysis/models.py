@@ -133,14 +133,23 @@ def multiplet_lorentzian(f, center, J, multiplicity, gamma, A):
 
 
 @jit(nopython=True, cache=True)
-def j_modulated_t2(t, M0, T2, J, offset):
+def j_modulated_t2(t, M0, T2, J, offset, depth=1.0):
     """
-    J-Modulated T2 Decay (Cosine Modulation).
-    M(t) = | M0 * exp(-t/T2) * cos(pi * J * t) | + offset
-    Usually standard Hahn Echo modulation is cos(pi J t).
-    We take absolute value because we often fit magnitude data.
+    J-Modulated T2 Decay with variable modulation depth.
+
+    M(t) = | M0 * exp(-t/T2) * ((1-depth) + depth * cos(pi * J * t)) | + offset
+
+    Parameters:
+        depth: Modulation depth (0.0 to 1.0)
+               - 1.0 = Full modulation (dips to zero)
+               - 0.5 = Half modulation (cosine oscillates between 0.5 and 1.5)
+               - 0.0 = No modulation (simple exponential decay)
+
+    This accounts for unmodulated components (e.g., singlets) or partial J-coupling.
     """
-    return np.abs(M0 * np.exp(-t / T2) * np.cos(np.pi * J * t)) + offset
+    envelope = M0 * np.exp(-t / T2)
+    modulation = (1.0 - depth) + depth * np.cos(np.pi * J * t)
+    return np.abs(envelope * modulation) + offset
 
 
 @jit(nopython=True, cache=True)
