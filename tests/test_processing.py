@@ -21,8 +21,8 @@ def test_extract_echo_train_synthetic():
 
     times, amps, _, _ = extract_echo_train(data)
 
-    # Expect relative times (start at 0)
-    expected_times = [0, 200, 400, 600, 800]
+    # Expect absolute times (extract_echo_train no longer trims)
+    expected_times = [100, 300, 500, 700, 900]
 
     assert len(times) == 5
     assert np.allclose(times, expected_times, atol=1.0)

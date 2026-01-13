@@ -968,8 +968,8 @@ def _run_analysis(
             td_amplitudes = np.array(td_amplitudes)
 
             # Fit T2 (Time Domain)
-            params, fit_curve, residuals, r2, param_errors = Fitter.fit_t2(
-                td_delays, td_amplitudes
+            params, fit_curve, residuals, r2, param_errors, outlier_mask = (
+                Fitter.fit_t2(td_delays, td_amplitudes)
             )
 
             # Determine experiment name from directory with week/substance
@@ -994,6 +994,7 @@ def _run_analysis(
                 residuals=residuals,
                 r_squared=r2,
                 param_errors=param_errors,
+                metadata={"outlier_mask": outlier_mask},
             )
 
             print_result(td_result)
@@ -1296,7 +1297,7 @@ def _run_analysis(
                     # peak_times = peak_times[2:]
                     # peak_amps = peak_amps[2:]
 
-                    params, _, _, _, _ = Fitter.fit_t2(peak_times, peak_amps)
+                    params, _, _, _, _, _ = Fitter.fit_t2(peak_times, peak_amps)
 
                     if "T2" in params and params["T2"] > 0:
                         t2_obs = params["T2"]
@@ -1786,6 +1787,7 @@ def _run_analysis(
         raw_traces.sort(key=lambda x: x[6])
 
         console.print("Fitting data...")
+        outlier_mask = None
         if experiment == ExperimentType.T1:
             params, fit_curve, residuals, r2, param_errors = Fitter.fit_t1(
                 delays, amplitudes_fit
@@ -1826,7 +1828,7 @@ def _run_analysis(
                 console.print(
                     "[cyan]Alcohol dataset detected: Using J-Modulated T2 Fit[/cyan]"
                 )
-                params, fit_curve, residuals, r2, param_errors = (
+                params, fit_curve, residuals, r2, param_errors, outlier_mask = (
                     Fitter.fit_modulated_t2(delays, amplitudes_fit)
                 )
                 week, substance = _get_week_and_substance(path, prefix)
@@ -1841,8 +1843,8 @@ def _run_analysis(
                     else "T2 Analysis (J-Modulated)"
                 )
             else:
-                params, fit_curve, residuals, r2, param_errors = Fitter.fit_t2(
-                    delays, amplitudes_fit
+                params, fit_curve, residuals, r2, param_errors, outlier_mask = (
+                    Fitter.fit_t2(delays, amplitudes_fit)
                 )
                 week, substance = _get_week_and_substance(path, prefix)
                 title_prefix = (
@@ -1862,6 +1864,7 @@ def _run_analysis(
             residuals=residuals,
             r_squared=r2,
             param_errors=param_errors,
+            metadata={"outlier_mask": outlier_mask} if outlier_mask is not None else {},
         )
 
         print_result(result)
@@ -2776,7 +2779,34 @@ def plot_analysis_summary(
             ax_right.legend(loc="best", fontsize=8)
     else:
         # Plot data points
-        ax_right.scatter(x, y, c="blue", label="Data Points", zorder=3)
+        x_arr = np.array(x)
+        y_arr = np.array(y)
+        outlier_mask = result.metadata.get("outlier_mask")
+
+        if outlier_mask is not None and len(outlier_mask) == len(x_arr):
+            mask = np.array(outlier_mask, dtype=bool)
+            # Inliers
+            if np.any(~mask):
+                ax_right.scatter(
+                    x_arr[~mask],
+                    y_arr[~mask],
+                    c="blue",
+                    label="Data Points",
+                    zorder=3,
+                )
+            # Outliers
+            if np.any(mask):
+                ax_right.scatter(
+                    x_arr[mask],
+                    y_arr[mask],
+                    c="red",
+                    marker="x",
+                    s=50,
+                    label="Outliers",
+                    zorder=3,
+                )
+        else:
+            ax_right.scatter(x_arr, y_arr, c="blue", label="Data Points", zorder=3)
 
         # Fit Curve - use dense grid for J-modulated to show oscillations
         if result.fit_curve is not None:

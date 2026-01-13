@@ -688,10 +688,10 @@ def find_peaks_t1_t2(
 
         max_val = np.max(detection_signal)
 
-        # Threshold: 15% of max
+        # Threshold: 5% of max (lowered from 15% to detect weak echoes)
         # Repo: height = 0.15 * calc_max
-        height_threshold = 0.15 * max_val
-        prominence_val = 0.1 * max_val
+        height_threshold = 0.05 * max_val
+        prominence_val = 0.05 * max_val
 
         peaks, _ = find_peaks(
             detection_signal,
@@ -719,14 +719,17 @@ def find_peaks_t1_t2(
         # Selection Logic
         # Need P1 (Start) + Echoes.
         # If < 2 peaks (only max?), fail/fallback.
-        if len(peaks) < 2:
+        # Selection Logic
+        # Need P1 (Start) + Echoes.
+        # If < 1 peak (impossible given global max insert), fail.
+        if len(peaks) < 1:
             return (
-                global_max_idx,
+                0,
                 1.0,
                 1.0,
                 {
-                    "p1_idx": global_max_idx,
-                    "fit_idx": global_max_idx,
+                    "p1_idx": 0,
+                    "fit_idx": 0,
                     "all_peaks": peaks,
                 },
             )
@@ -761,6 +764,16 @@ def find_peaks_t1_t2(
             y0 = detection_signal[p1_idx]
             if y0 <= 0:
                 y0 = 1e-9
+
+            # Dynamic Noise Threshold
+            # Estimate noise floor using MAD (Median Absolute Deviation)
+            # This is robust against the peaks themselves
+            median_val = np.median(detection_signal)
+            mad = np.median(np.abs(detection_signal - median_val))
+            sigma = 1.4826 * mad
+            # Threshold: Median + 4*Sigma (approx 4 sigma above noise floor)
+            # Ensure at least tiny epsilon to avoid div by zero issues elsewhere
+            noise_threshold = median_val + 4.0 * sigma
 
             total_duration = time[-1] - time[0]
             min_sep_time = 0.05 * total_duration
@@ -807,8 +820,11 @@ def find_peaks_t1_t2(
                     t = t_cands[i]
 
                     # Threshold Check (User: "above 5") - apply to raw signal
-                    # If this filters too much noise, good.
-                    if y <= 5.0:
+                    # If this filters too
+                    # Threshold Check
+                    # Use Robust Dynamic Noise Threshold
+                    # Fallback: if signal is clean (sigma~0), assume threshold > median
+                    if y <= noise_threshold:
                         continue
 
                     if y >= y0_raw:
@@ -910,7 +926,13 @@ def preprocess_data(
         # We need basic peak finding here to identify candidates
         # User Request Fix: distance=100 suppressed P1 if P2 was close.
         # Reduced to 1 to find ALL candidates above threshold.
-        t2_peaks, _ = find_peaks(signal, height=threshold, distance=1)
+        # FIX: Pad START of signal with 0 to detect if P1 is at index 0
+        signal_padded = np.r_[0, signal]
+        t2_peaks_padded, _ = find_peaks(signal_padded, height=threshold, distance=1)
+        t2_peaks = t2_peaks_padded - 1  # Shift back indices
+
+        # Filter out invalid indices (from padding) if any - though padding was at 0 so peak at 1 -> index 0
+        t2_peaks = t2_peaks[t2_peaks >= 0]
 
         if len(t2_peaks) > 0:
             # Take the FIRST peak that meets the criteria
@@ -924,10 +946,11 @@ def preprocess_data(
             for i in range(1, len(t2_peaks)):
                 next_peak_idx = t2_peaks[i]
 
-                # Check 1: Near Environment? (e.g. within 0.05s)
+                # Check 1: Near Environment? (e.g. within 0.0005s = 500us)
                 # Typically artifacts are very close to the pulse.
+                # 0.05s is TOO LARGE (swallows echoes).
                 time_diff = time[next_peak_idx] - time[start_idx]
-                if time_diff > 0.05:  # Limit search to near environment
+                if time_diff > 0.0005:  # Limit search to immediate vicinity
                     break
 
                 # Check 2: Is it Higher?

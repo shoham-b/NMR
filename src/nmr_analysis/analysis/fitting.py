@@ -120,10 +120,10 @@ class Fitter:
     @staticmethod
     def fit_t2(
         delays: np.ndarray, amplitudes: np.ndarray
-    ) -> Tuple[dict, np.ndarray, np.ndarray, float, dict]:
+    ) -> Tuple[dict, np.ndarray, np.ndarray, float, dict, np.ndarray]:
         """
         Fit T2 Spin Echo decay.
-        Returns: params, fit_curve, residuals, r_squared, param_errors
+        Returns: params, fit_curve, residuals, r_squared, param_errors, outlier_mask
         """
         M0_guess = np.max(amplitudes) if len(amplitudes) > 0 else 1.0
         T2_guess = np.mean(delays) if len(delays) > 0 else 1.0
@@ -135,26 +135,42 @@ class Fitter:
                 np.zeros_like(delays),
                 np.zeros_like(delays),
                 0.0,
-                0.0,
-                {"error": "Insufficient data"},
+                {},
+                np.zeros_like(delays, dtype=bool),
             )
 
         # Remove outliers using semi-log linearity check
-        delays_fit, amplitudes_fit, _ = Fitter._remove_outliers_semilog(
+        delays_fit, amplitudes_fit, outlier_mask = Fitter._remove_outliers_semilog(
             delays, amplitudes
         )
 
+        # If too few points, fallback. But we still want to report the mask if possible?
+        # If fallback implies "keeping everything", we should reset the mask.
         if len(delays_fit) < 3:
-            # Fallback to original data if filtering removes too much
             delays_fit, amplitudes_fit = delays, amplitudes
+            outlier_mask = np.ones_like(delays, dtype=bool)
+
+        # Invert the logic: _remove_outliers_semilog returns a mask of KEEP points (inliers).
+        # We want "outlier_mask" to be True for OUTLIERS, usually.
+        # But wait, looking at _remove_outliers_semilog implementation:
+        # It returns (delays[final_mask], amplitudes[final_mask], final_mask)
+        # where final_mask is True for INLIERS.
+        # Let's clarify the variable name. Let's return `inlier_mask` to be unambiguous.
+
+        inlier_mask = outlier_mask
 
         try:
             popt, pcov = curve_fit(t2_decay_model, delays_fit, amplitudes_fit, p0=p0)
             M0, T2, offset = popt
+
+            # Fit curve on ALL points (to see deviation)
             fit_curve = t2_decay_model(delays, *popt)
             residuals = amplitudes - fit_curve
 
-            # Simple R2
+            # Simple R2 (on all points or just fitted points? Usually fitting metrics are on fitted points)
+            # But we might want to know how bad the outliers are.
+            # Let's stick to standard returning residuals for everything.
+
             ss_res = np.sum(residuals**2)
             ss_tot = np.sum((amplitudes - np.mean(amplitudes)) ** 2)
             r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0.0
@@ -168,14 +184,22 @@ class Fitter:
                 residuals,
                 r2,
                 param_errors,
+                ~inlier_mask,  # Return True for OUTLIERS
             )
         except (RuntimeError, ValueError):
-            return {}, np.zeros_like(delays), np.zeros_like(delays), 0.0, {}
+            return (
+                {},
+                np.zeros_like(delays),
+                np.zeros_like(delays),
+                0.0,
+                {},
+                np.zeros_like(delays, dtype=bool),
+            )
 
     @staticmethod
     def fit_modulated_t2(
         delays: np.ndarray, amplitudes: np.ndarray, guess_J: float = 7.0
-    ) -> Tuple[dict, np.ndarray, np.ndarray, float, dict]:
+    ) -> Tuple[dict, np.ndarray, np.ndarray, float, dict, np.ndarray]:
         """
         Fit J-Modulated T2 Spin Echo decay using a two-stage approach with modulation depth.
 
@@ -183,6 +207,7 @@ class Fitter:
         Stage 2: Use Stage 1 results as initial guesses for full J-modulated fit with depth.
 
         Model: | M0 * exp(-t/T2) * ((1-depth) + depth * cos(pi*J*t)) | + offset
+        Returns: params, fit_curve, residuals, r_squared, param_errors, outlier_mask
         """
         from nmr_analysis.analysis.models import j_modulated_t2
 
@@ -198,9 +223,16 @@ class Fitter:
             delays, amplitudes
         )
 
+        # This mask will track points used in Stage 2 fit (True = used, False = outlier)
+        # Initialize with the mask from Stage 1, as these are already considered "good" for the envelope.
+        final_inlier_mask = mask_stage1.copy()
+
         if len(delays_stage1) < 3:
             delays_stage1, amplitudes_stage1 = delays, amplitudes
             mask_stage1 = np.ones_like(delays, dtype=bool)
+            final_inlier_mask = np.ones_like(
+                delays, dtype=bool
+            )  # Reset if Stage 1 failed to filter
 
         try:
             popt_stage1, _ = curve_fit(
@@ -217,10 +249,17 @@ class Fitter:
             M0_stage1, T2_stage1, offset_stage1 = M0_guess, T2_guess, offset_guess
             # If stage 1 failed, we can't reliably filter stage 2, so keep all
             popt_stage1 = None
+            final_inlier_mask = np.ones_like(
+                delays, dtype=bool
+            )  # If Stage 1 fit failed, assume all are inliers for now
 
         # ===== Stage 2: Fit Full J-Modulated Model with Depth =====
         # Prepare data for Stage 2: Remove high outliers (spikes) but KEEP troughs.
         # Use Stage 1 fit as reference envelope.
+
+        # Initialize delays_final and amplitudes_final with the full data,
+        # and then apply further filtering if Stage 1 was successful.
+        delays_final, amplitudes_final = delays, amplitudes
 
         if popt_stage1 is not None and np.sum(mask_stage1) > 2:
             # Calculate Envelope
@@ -245,16 +284,24 @@ class Fitter:
                 # Keep points where diff is NOT huge positive
                 stage2_mask = diff_full < (4.0 * robust_sigma)
 
+                # Combine Stage 1 and Stage 2 masks: A point must be an inlier in both stages
+                combined_mask = final_inlier_mask & stage2_mask
+
                 # Ensure we don't kill too much data
-                if np.sum(stage2_mask) > len(delays) // 2:
-                    delays_final = delays[stage2_mask]
-                    amplitudes_final = amplitudes[stage2_mask]
+                if np.sum(combined_mask) > len(delays) // 2:
+                    delays_final = delays[combined_mask]
+                    amplitudes_final = amplitudes[combined_mask]
+                    final_inlier_mask = combined_mask
                 else:
-                    delays_final, amplitudes_final = delays, amplitudes
-            else:
-                delays_final, amplitudes_final = delays, amplitudes
-        else:
-            delays_final, amplitudes_final = delays, amplitudes
+                    # If too much data is removed by combined_mask, revert to using only Stage 1 mask
+                    # or even full data if Stage 1 mask was too aggressive.
+                    # For simplicity, if combined is too aggressive, we just use the Stage 1 mask.
+                    # If Stage 1 mask was already too aggressive (len(delays_stage1) < 3),
+                    # final_inlier_mask would have been reset to all True.
+                    delays_final = delays[final_inlier_mask]
+                    amplitudes_final = amplitudes[final_inlier_mask]
+            # else: robust_sigma is 0, so no further filtering based on envelope, final_inlier_mask remains as is from Stage 1
+        # else: popt_stage1 is None or mask_stage1 has too few points, final_inlier_mask remains all True
 
         # Use Stage 1 results as initial guesses
         # p0: [M0, T2, J, offset, depth]
@@ -296,6 +343,7 @@ class Fitter:
                 residuals,
                 r2,
                 param_errors,
+                ~final_inlier_mask,  # Outlier mask
             )
         except (RuntimeError, ValueError) as e:
             return (
@@ -304,13 +352,14 @@ class Fitter:
                 np.zeros_like(delays),
                 0.0,
                 {"error": str(e)},
+                np.zeros_like(delays, dtype=bool),
             )
 
     @staticmethod
     def fit_t2_star(
         data: NMRData,
         smoothing: float = 1.0,
-        start_trim_percent: float = 0.06,
+        start_trim_percent: float = 0.05,
         end_trim_buffer_percent: float = 0.05,
     ) -> AnalysisResult:
         """
@@ -319,10 +368,8 @@ class Fitter:
         Args:
             data: NMRData object
             smoothing: Sigma for gaussian smoothing
-            start_trim_percent: Fraction of data after peak to skip (start trim).
-                                Default 0.05 (5%) skips the immediate post-peak region.
-            end_trim_buffer_percent: Fraction of total length to buffer *before* the noise floor.
-                                     Default 0.05 (5%) stops fitting slightly before the signal hits noise.
+            start_trim_percent: Fraction of detected DECAY LENGTH to skip after peak.
+            end_trim_buffer_percent: Fraction of detected DECAY LENGTH to buffer before noise.
         """
         from scipy.ndimage import gaussian_filter1d
 
@@ -351,19 +398,18 @@ class Fitter:
         # 1. Find Peak Index (Max of Smoothed Magnitude)
         peak_idx = np.argmax(detection_signal)
 
-        # 2. Determine Start Index (Peak + Start Trim)
-        # We trim a chunk AFTER the peak
-        start_trim_points = int(n_samples * start_trim_percent)
-        global_start_fit_idx = peak_idx + start_trim_points
-
-        # 3. Determine End Index (Smart Noise Floor Detection)
+        # 2. Determine Decay End (Smart Noise Floor Detection)
         # Step A: Estimate Noise Floor from the last 15% of data
         noise_window_start = int(n_samples * 0.85)
-        if noise_window_start < peak_idx:
-            noise_window_start = n_samples - 1  # Fallback
+        # Assuming peak is somewhat earlier than the end
+        if noise_window_start <= peak_idx:
+            # Fallback: very short signal or peak is late
+            noise_window_start = min(
+                peak_idx + (n_samples - peak_idx) // 2, n_samples - 2
+            )
 
         noise_segment = detection_signal[noise_window_start:]
-        if len(noise_segment) > 0:
+        if len(noise_segment) > 1:
             noise_mean = np.mean(noise_segment)
             noise_std = np.std(noise_segment)
             # Threshold: Mean + 3*Sigma (Standard 99.7% limit)
@@ -372,33 +418,27 @@ class Fitter:
             noise_threshold = 0.0
 
         # Step B: Find where signal First drops below/near noise threshold AFTER peak
-        # We search from global_start_fit_idx
         decay_stop_idx = n_samples  # Default to end
 
-        if global_start_fit_idx < n_samples:
-            # Find first index where signal < noise_threshold
-            # Or maybe approach it? If signal is exponential, it approaches asymptotically.
-            # We want "where declination stopped".
-            # Let's look for the point where it enters the noise band.
+        # Search slice from Peak til End
+        search_slice = detection_signal[peak_idx:]
+        below_noise = search_slice < noise_threshold
 
-            # Slice from start fit to end
-            search_slice = detection_signal[global_start_fit_idx:]
+        if np.any(below_noise):
+            # Found a point below noise
+            first_noise_idx = np.argmax(below_noise)  # absolute index within slice
+            decay_stop_idx = peak_idx + first_noise_idx
 
-            # Boolean mask: Signal < Threshold
-            below_noise = search_slice < noise_threshold
-            if np.any(below_noise):
-                # Found a point below noise
-                first_noise_idx = np.argmax(below_noise)  # absolute index within slice
-                decay_stop_idx = global_start_fit_idx + first_noise_idx
-            else:
-                # Signal never drops below calculated threshold (maybe high SNR or short acquistion)
-                # In this case, we use the whole signal?
-                # Or we might want to trim the very end anyway if requested?
-                pass
+        # 3. Calculate Effective Decay Length
+        decay_len = decay_stop_idx - peak_idx
+        if decay_len <= 0:
+            decay_len = n_samples - peak_idx  # Fallback
 
-        # Step C: Apply End Buffer BEFORE the decay stop
-        # "Chunk before declination stopped"
-        end_buffer_points = int(n_samples * end_trim_buffer_percent)
+        # 4. Calculate Trims based on DECAY LENGTH
+        start_trim_points = int(decay_len * start_trim_percent)
+        end_buffer_points = int(decay_len * end_trim_buffer_percent)
+
+        global_start_fit_idx = peak_idx + start_trim_points
         global_end_fit_idx = decay_stop_idx - end_buffer_points
 
         # SAFETY CHECKS
@@ -423,7 +463,7 @@ class Fitter:
             # Force at least some points if possible
             if n_samples > peak_idx + 5:
                 global_start_fit_idx = peak_idx
-                global_end_fit_idx = n_samples
+                global_end_fit_idx = min(decay_stop_idx, n_samples)
             else:
                 # Signal too short
                 global_start_fit_idx = 0
@@ -431,12 +471,7 @@ class Fitter:
 
         # Slice for fitting
         t_fit = time[global_start_fit_idx:global_end_fit_idx]
-        mag_fit = raw_magnitude[
-            global_start_fit_idx:global_end_fit_idx
-        ]  # Fitting RAW magnitude, not smoothed?
-        # User in previous code: "Use smoothed data for fitting? User: 'also use smoothing for the data'"
-        # Previous code used: `mag_fit = detection_signal[...]` where detection_signal IS smoothed.
-        # Let's Stick to Smoothed Data for fit as per previous comment.
+        # Use Smoothed Data for fit as established
         mag_fit = detection_signal[global_start_fit_idx:global_end_fit_idx]
 
         # Check for insufficient data points (Need at least 3 for M0, T2, offset)
@@ -513,6 +548,7 @@ class Fitter:
                         "end_trim_buffer_percent": end_trim_buffer_percent,
                         "decay_stop_idx": decay_stop_idx,
                         "noise_threshold": float(noise_threshold),
+                        "decay_len": decay_len,
                     },
                 },
             )
