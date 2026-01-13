@@ -13,7 +13,7 @@ from scipy.ndimage import gaussian_filter1d
 
 from nmr_analysis.analysis.fitting import Fitter
 from nmr_analysis.analysis.hybrid import analyze_spectral_series, HybridAnalysisResult
-from nmr_analysis.analysis.models import t2_decay_model
+from nmr_analysis.analysis.models import t2_decay_model, j_modulated_t2
 from nmr_analysis.analysis.processing import (
     extract_echo_train,
     preprocess_data,
@@ -617,6 +617,10 @@ def montage(
         time = ctx.data.time
         signal = np.real(ctx.data.signal)  # Use Signed Signal (User Request)
 
+        # Plot Data first (underneath or above?) Generally Data is dots, Fit is line.
+        # Line on top of dots is usually better visibility for fit vs data.
+        ax.scatter(time, signal, s=10, alpha=0.6, label="Data", color="blue")
+
         # Fit
         fit_curve = ctx.result.fit_curve
         if fit_curve is None:
@@ -624,16 +628,45 @@ def montage(
             ax.text(0.5, 0.5, "Fit Failed", ha="center", va="center")
             continue
 
-        # Plot Data
-        ax.scatter(time, signal, s=10, alpha=0.6, label="Data", color="blue")
-        # Plot Fit
-        ax.plot(time, fit_curve, "r-", linewidth=2, label="Fit")
+        # Re-generate Smooth Fit Curve if params available
+        # This ensures we see the true modulation, not just points at data times
+        if "J" in ctx.result.params and "depth" in ctx.result.params:
+            # J-Modulated Model
+            t_smooth = np.linspace(0, np.max(time), 1000)
+            # Model: M0, T2, J, offset, depth
+            p = ctx.result.params
+            y_smooth = j_modulated_t2(
+                t_smooth, p["M0"], p["T2"], p["J"], p["offset"], p["depth"]
+            )
+
+            # Plot Smooth Fit
+            ax.plot(t_smooth, y_smooth, "r-", linewidth=2, label="Fit")
+        else:
+            # Standard T2: simpler curve
+            # Or just use the existing fit_curve if it's good enough?
+            # Existing fit_curve is only at data points. Smooth is better.
+            if "T2" in ctx.result.params:
+                t_smooth = np.linspace(0, np.max(time), 1000)
+                p = ctx.result.params
+                # M0 * exp(-t/T2) + offset
+                y_smooth = p["M0"] * np.exp(-t_smooth / p["T2"]) + p.get("offset", 0)
+                ax.plot(t_smooth, y_smooth, "r-", linewidth=2, label="Fit")
+            else:
+                # Fallback
+                ax.plot(time, fit_curve, "r-", linewidth=2, label="Fit")
 
         # Fit Info text
         try:
             t2_val = ctx.result.params.get("T2", 0)
             r2_val = ctx.result.r_squared
+
             info_text = f"T2: {t2_val:.4f} s\nR²: {r2_val:.4f}"
+
+            if "J" in ctx.result.params:
+                j_val = ctx.result.params["J"]
+                depth_val = ctx.result.params["depth"]
+                info_text += f"\nJ: {j_val:.2f} Hz\nd: {depth_val:.2f}"
+
         except:
             info_text = "N/A"
 
@@ -1778,6 +1811,8 @@ def _run_analysis(
                 or parent_name.endswith("nol")
                 or "alcohol" in parent_name
                 or _contains_nol_word(parent_name)
+                or (path / "ethanol_percent.txt").exists()
+                or (path.parent / "ethanol_percent.txt").exists()
             ):
                 console.print(
                     "[cyan]Alcohol dataset detected: Using J-Modulated T2 Fit[/cyan]"
@@ -2831,13 +2866,9 @@ def plot_analysis_summary(
 
 
 if __name__ == "__main__":
-    for week in (
-        "4.1",
-        "4.2",
-        "5.1",
-        "5.2",
-    ):
-        week_path = Path(rf"H:\My Drive\Lab C\NMR\week{week}")
+    for week_path in Path(r"H:\My Drive\Lab C\NMR").iterdir():
+        # week_path = Path(rf"H:\My Drive\Lab C\NMR\week{week}")
+        week = week_path.stem[4:]
         if not week_path.exists():
             console.print(f"[yellow]Skipping week {week}: directory not found[/yellow]")
             continue

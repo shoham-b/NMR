@@ -9,6 +9,59 @@ from nmr_analysis.core.types import NMRData, AnalysisResult, ExperimentType
 
 class Fitter:
     @staticmethod
+    def _remove_outliers_semilog(
+        delays: np.ndarray, amplitudes: np.ndarray, threshold: float = 4.0
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Identify outliers based on semi-log linearity.
+        Returns: (filtered_delays, filtered_amplitudes, mask)
+        """
+        # Only consider positive amplitudes for log
+        valid_mask = amplitudes > 0
+
+        # If too few points, return original
+        if np.sum(valid_mask) < 3:
+            return delays, amplitudes, np.ones_like(delays, dtype=bool)
+
+        t_valid = delays[valid_mask]
+        log_amp_valid = np.log(amplitudes[valid_mask])
+
+        # Linear fit: log(A) = -t/T2 + log(M0)
+        # y = mx + c
+        slope, intercept = np.polyfit(t_valid, log_amp_valid, 1)
+
+        predicted_log = slope * t_valid + intercept
+        residuals = log_amp_valid - predicted_log
+
+        # Use robust statistics (MAD) instead of STD to be resistant to large outliers
+        median_res = np.median(residuals)
+        mad = np.median(np.abs(residuals - median_res))
+
+        # 1.4826 is the scaling factor for normal distribution consistency
+        sigma_est = 1.4826 * mad
+
+        if sigma_est == 0:
+            # If perfect fit or no variation, fall back to std or just keep all
+            sigma_est = np.std(residuals)
+            if sigma_est == 0:
+                return delays, amplitudes, np.ones_like(delays, dtype=bool)
+
+        # Identify outliers
+        # We define outliers as deviations from the MEDIAN residual, not mean
+        deviation = np.abs(residuals - median_res)
+        inlier_mask_subset = deviation <= threshold * sigma_est
+
+        # Create full mask
+        final_mask = np.zeros_like(delays, dtype=bool)
+
+        # We need to map back the inlier_mask_subset to the full array
+        # valid_mask indices:
+        valid_indices = np.where(valid_mask)[0]
+        final_mask[valid_indices] = inlier_mask_subset
+
+        return delays[final_mask], amplitudes[final_mask], final_mask
+
+    @staticmethod
     def fit_t1(
         delays: np.ndarray, amplitudes: np.ndarray
     ) -> Tuple[dict, np.ndarray, np.ndarray, float, dict]:
@@ -82,11 +135,21 @@ class Fitter:
                 np.zeros_like(delays),
                 np.zeros_like(delays),
                 0.0,
+                0.0,
                 {"error": "Insufficient data"},
             )
 
+        # Remove outliers using semi-log linearity check
+        delays_fit, amplitudes_fit, _ = Fitter._remove_outliers_semilog(
+            delays, amplitudes
+        )
+
+        if len(delays_fit) < 3:
+            # Fallback to original data if filtering removes too much
+            delays_fit, amplitudes_fit = delays, amplitudes
+
         try:
-            popt, pcov = curve_fit(t2_decay_model, delays, amplitudes, p0=p0)
+            popt, pcov = curve_fit(t2_decay_model, delays_fit, amplitudes_fit, p0=p0)
             M0, T2, offset = popt
             fit_curve = t2_decay_model(delays, *popt)
             residuals = amplitudes - fit_curve
@@ -129,11 +192,21 @@ class Fitter:
         T2_guess = np.mean(delays) if len(delays) > 0 else 0.5
         offset_guess = np.min(amplitudes) if len(amplitudes) > 0 else 0.0
 
+        # Remove outliers for Stage 1 (Initial T2 estimate)
+        # We also capture the mask to calculate noise level on "envelope" points.
+        delays_stage1, amplitudes_stage1, mask_stage1 = Fitter._remove_outliers_semilog(
+            delays, amplitudes
+        )
+
+        if len(delays_stage1) < 3:
+            delays_stage1, amplitudes_stage1 = delays, amplitudes
+            mask_stage1 = np.ones_like(delays, dtype=bool)
+
         try:
             popt_stage1, _ = curve_fit(
                 t2_decay_model,
-                delays,
-                amplitudes,
+                delays_stage1,
+                amplitudes_stage1,
                 p0=[M0_guess, T2_guess, offset_guess],
                 bounds=([0, 0, -np.inf], [np.inf, np.inf, np.inf]),
                 maxfev=5000,
@@ -142,8 +215,47 @@ class Fitter:
         except (RuntimeError, ValueError):
             # Fallback to initial guesses if Stage 1 fails
             M0_stage1, T2_stage1, offset_stage1 = M0_guess, T2_guess, offset_guess
+            # If stage 1 failed, we can't reliably filter stage 2, so keep all
+            popt_stage1 = None
 
         # ===== Stage 2: Fit Full J-Modulated Model with Depth =====
+        # Prepare data for Stage 2: Remove high outliers (spikes) but KEEP troughs.
+        # Use Stage 1 fit as reference envelope.
+
+        if popt_stage1 is not None and np.sum(mask_stage1) > 2:
+            # Calculate Envelope
+            envelope = t2_decay_model(delays, M0_stage1, T2_stage1, offset_stage1)
+
+            # Calculate noise sigma from the "inliers" identified in Stage 1
+            # (These are points close to the envelope)
+            # We calculate residuals of 'inliers' vs the fitted envelope
+            clean_residuals = amplitudes[mask_stage1] - envelope[mask_stage1]
+            robust_sigma = 1.4826 * np.median(
+                np.abs(clean_residuals - np.median(clean_residuals))
+            )
+
+            if robust_sigma == 0:
+                robust_sigma = np.std(clean_residuals)
+
+            if robust_sigma > 0:
+                # Filter Positive Outliers (Spikes)
+                # We do NOT filter negative residuals (troughs/modulation)
+                # Threshold: 4.0 sigma is safe for spikes
+                diff_full = amplitudes - envelope
+                # Keep points where diff is NOT huge positive
+                stage2_mask = diff_full < (4.0 * robust_sigma)
+
+                # Ensure we don't kill too much data
+                if np.sum(stage2_mask) > len(delays) // 2:
+                    delays_final = delays[stage2_mask]
+                    amplitudes_final = amplitudes[stage2_mask]
+                else:
+                    delays_final, amplitudes_final = delays, amplitudes
+            else:
+                delays_final, amplitudes_final = delays, amplitudes
+        else:
+            delays_final, amplitudes_final = delays, amplitudes
+
         # Use Stage 1 results as initial guesses
         # p0: [M0, T2, J, offset, depth]
         p0 = [M0_stage1, T2_stage1, guess_J, offset_stage1, 0.9]
@@ -155,8 +267,8 @@ class Fitter:
 
             popt, pcov = curve_fit(
                 j_modulated_t2,
-                delays,
-                amplitudes,
+                delays_final,
+                amplitudes_final,
                 p0=p0,
                 bounds=(bounds_min, bounds_max),
                 maxfev=10000,
@@ -196,13 +308,21 @@ class Fitter:
 
     @staticmethod
     def fit_t2_star(
-        data: NMRData, smoothing: float = 1.0, trim_percent: float = 0.1
+        data: NMRData,
+        smoothing: float = 1.0,
+        start_trim_percent: float = 0.09,
+        end_trim_buffer_percent: float = 0.05,
     ) -> AnalysisResult:
         """
         Fit T2* from a single FID trace.
-        Trims the first and last `trim_percent` of data.
-        Applies Gaussian smoothing to the magnitude.
-        Starts fitting from the first peak > 5.0 (on smoothed data).
+
+        Args:
+            data: NMRData object
+            smoothing: Sigma for gaussian smoothing
+            start_trim_percent: Fraction of data after peak to skip (start trim).
+                                Default 0.05 (5%) skips the immediate post-peak region.
+            end_trim_buffer_percent: Fraction of total length to buffer *before* the noise floor.
+                                     Default 0.05 (5%) stops fitting slightly before the signal hits noise.
         """
         from scipy.ndimage import gaussian_filter1d
 
@@ -210,7 +330,7 @@ class Fitter:
         signal = data.signal
         raw_magnitude = np.abs(signal)
 
-        # Apply smoothing first
+        # Apply smoothing for peak finding / trimming logic (not necessarily for final fit)
         if smoothing > 0:
             detection_signal = gaussian_filter1d(raw_magnitude, sigma=smoothing)
         else:
@@ -226,48 +346,97 @@ class Fitter:
                 r_squared=0.0,
             )
 
-        # Find Peak Index (Max of Smoothed Magnitude)
+        n_samples = len(raw_magnitude)
+
+        # 1. Find Peak Index (Max of Smoothed Magnitude)
         peak_idx = np.argmax(detection_signal)
 
-        # Trimming Logic:
-        # Start: Peak Index + 20% of the "tail" (data after peak)
-        # End: Total Length - 10% of Total Length
+        # 2. Determine Start Index (Peak + Start Trim)
+        # We trim a chunk AFTER the peak
+        start_trim_points = int(n_samples * start_trim_percent)
+        global_start_fit_idx = peak_idx + start_trim_points
 
-        n_samples = len(raw_magnitude)
-        tail_length = n_samples - peak_idx
+        # 3. Determine End Index (Smart Noise Floor Detection)
+        # Step A: Estimate Noise Floor from the last 15% of data
+        noise_window_start = int(n_samples * 0.85)
+        if noise_window_start < peak_idx:
+            noise_window_start = n_samples - 1  # Fallback
 
-        # 20% of tail
-        # User updated requirement: "take the data only starting with the highest amplitude"
-        # So start_trim_factor should be 0.0
-        start_trim_factor = 0.0
-        end_trim_factor = 0.1
+        noise_segment = detection_signal[noise_window_start:]
+        if len(noise_segment) > 0:
+            noise_mean = np.mean(noise_segment)
+            noise_std = np.std(noise_segment)
+            # Threshold: Mean + 3*Sigma (Standard 99.7% limit)
+            noise_threshold = noise_mean + 3 * noise_std
+        else:
+            noise_threshold = 0.0
 
-        global_start_fit_idx = peak_idx + int(tail_length * start_trim_factor)
-        global_end_fit_idx = n_samples - int(n_samples * end_trim_factor)
+        # Step B: Find where signal First drops below/near noise threshold AFTER peak
+        # We search from global_start_fit_idx
+        decay_stop_idx = n_samples  # Default to end
 
-        # Ensure valid range
+        if global_start_fit_idx < n_samples:
+            # Find first index where signal < noise_threshold
+            # Or maybe approach it? If signal is exponential, it approaches asymptotically.
+            # We want "where declination stopped".
+            # Let's look for the point where it enters the noise band.
+
+            # Slice from start fit to end
+            search_slice = detection_signal[global_start_fit_idx:]
+
+            # Boolean mask: Signal < Threshold
+            below_noise = search_slice < noise_threshold
+            if np.any(below_noise):
+                # Found a point below noise
+                first_noise_idx = np.argmax(below_noise)  # absolute index within slice
+                decay_stop_idx = global_start_fit_idx + first_noise_idx
+            else:
+                # Signal never drops below calculated threshold (maybe high SNR or short acquistion)
+                # In this case, we use the whole signal?
+                # Or we might want to trim the very end anyway if requested?
+                pass
+
+        # Step C: Apply End Buffer BEFORE the decay stop
+        # "Chunk before declination stopped"
+        end_buffer_points = int(n_samples * end_trim_buffer_percent)
+        global_end_fit_idx = decay_stop_idx - end_buffer_points
+
+        # SAFETY CHECKS
+
+        # 1. Ensure Start < End
         if global_start_fit_idx >= global_end_fit_idx:
-            # Fallback: use the peak as start, and no end trim
-            global_start_fit_idx = peak_idx
+            # Buffer might be too aggressive or signal too short.
+            # Relax the buffer
+            global_end_fit_idx = decay_stop_idx
+
+        # 2. Ensure Start < End (Again)
+        if global_start_fit_idx >= global_end_fit_idx:
+            # If still invalid, try simply fitting from start to end of signal (ignoring noise logic)
             global_end_fit_idx = n_samples
 
-        # Ensure indices are within bounds
-        global_start_fit_idx = max(0, global_start_fit_idx)
-        global_end_fit_idx = min(n_samples, global_end_fit_idx)
+        # 3. Bounds
+        global_start_fit_idx = max(0, min(global_start_fit_idx, n_samples - 1))
+        global_end_fit_idx = max(0, min(global_end_fit_idx, n_samples))
 
-        # Re-check after bounds adjustment
-        if global_start_fit_idx >= global_end_fit_idx:
-            # If still invalid, try to get at least one point
-            if n_samples > 0:
+        # 4. Final Minimum Points Check
+        if global_end_fit_idx - global_start_fit_idx < 5:
+            # Force at least some points if possible
+            if n_samples > peak_idx + 5:
                 global_start_fit_idx = peak_idx
-                global_end_fit_idx = peak_idx + 1
+                global_end_fit_idx = n_samples
             else:
+                # Signal too short
                 global_start_fit_idx = 0
-                global_end_fit_idx = 0
+                global_end_fit_idx = n_samples
 
         # Slice for fitting
-        # Use smoothed data for fitting? User: "also use smoothing for the data"
         t_fit = time[global_start_fit_idx:global_end_fit_idx]
+        mag_fit = raw_magnitude[
+            global_start_fit_idx:global_end_fit_idx
+        ]  # Fitting RAW magnitude, not smoothed?
+        # User in previous code: "Use smoothed data for fitting? User: 'also use smoothing for the data'"
+        # Previous code used: `mag_fit = detection_signal[...]` where detection_signal IS smoothed.
+        # Let's Stick to Smoothed Data for fit as per previous comment.
         mag_fit = detection_signal[global_start_fit_idx:global_end_fit_idx]
 
         # Check for insufficient data points (Need at least 3 for M0, T2, offset)
@@ -339,6 +508,12 @@ class Fitter:
                     "end_index": global_end_fit_idx,
                     "smoothing": smoothing,
                     "peak_index": peak_idx,
+                    "trim_params": {
+                        "start_trim_percent": start_trim_percent,
+                        "end_trim_buffer_percent": end_trim_buffer_percent,
+                        "decay_stop_idx": decay_stop_idx,
+                        "noise_threshold": float(noise_threshold),
+                    },
                 },
             )
         except RuntimeError:
