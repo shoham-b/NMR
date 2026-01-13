@@ -2077,7 +2077,7 @@ def plot_stacked_traces(
     cmap = cm.viridis
     norm = plt.Normalize(0, num_traces - 1 if num_traces > 1 else 1)
 
-    for i, (processed_data, data_full, t_peak, amp, tau, peak_info, *_) in enumerate(
+    for i, (processed_data, t_peak, amp, tau, peak_info, data_full, *_) in enumerate(
         raw_traces
     ):
         # Skip invalid trace data (e.g. from failed analysis)
@@ -2405,7 +2405,7 @@ def plot_analysis_summary(
 
 
 if __name__ == "__main__":
-    for week in ("4.2", "5.1"):
+    for week in ("4.1","4.2","5.1"):
         week_path = Path(rf"H:\My Drive\Lab C\NMR\week{week}")
         if not week_path.exists():
             console.print(f"[yellow]Skipping week {week}: directory not found[/yellow]")

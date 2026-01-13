@@ -741,24 +741,49 @@ def find_peaks_t1_t2(
 
         if len(peaks) >= 2:
             # Filter candidates to only peaks within a reasonable time window from P1
-            # This prevents selecting late-time noise floor points.
             MAX_ECHO_TIME = 0.15  # seconds - typical echo window
 
             t0 = time[p1_idx]
-            candidates_raw = peaks[1:]
+            total_duration = time[-1] - time[0]
+            min_separation = (
+                0.05 * total_duration
+            )  # User Request: at least 5% of signal length
 
-            # Filter by time window
+            candidates_raw = peaks  # Search ALL peaks for candidates after P1
+
+            # Filter by time window AND separation
             candidates = []
             for idx in candidates_raw:
-                if time[idx] - t0 <= MAX_ECHO_TIME:
-                    candidates.append(idx)
-            candidates = np.array(candidates) if len(candidates) > 0 else candidates_raw
+                # Check 1: Must be strictly after P1 (index check)
+                if idx <= p1_idx:
+                    continue
 
-            # SIMPLIFIED SELECTION: Pick the HIGHEST AMPLITUDE candidate
-            # This is the "outer envelope" approach - highest echo amplitude
-            cand_amps = detection_signal[candidates]
-            best_local_idx = np.argmax(cand_amps)
-            fit_idx = candidates[best_local_idx]
+                t_cand = time[idx]
+
+                # Check 2: Minimum Separation (5% of total time)
+                if t_cand - t0 < min_separation:
+                    continue
+
+                # Check 3: Maximum Time Window (Echo window)
+                if t_cand - t0 > MAX_ECHO_TIME:
+                    continue
+
+                candidates.append(idx)
+
+            candidates = np.array(candidates)
+
+            if len(candidates) > 0:
+                # SIMPLIFIED SELECTION: Pick the HIGHEST AMPLITUDE candidate
+                cand_amps = detection_signal[candidates]
+                best_local_idx = np.argmax(cand_amps)
+                fit_idx = candidates[best_local_idx]
+            else:
+                # No valid candidates after filtering?
+                # Fallback to next peak if available, or just P1
+                if len(peaks) > 1 and peaks[1] > p1_idx:
+                    fit_idx = peaks[1]
+                else:
+                    fit_idx = p1_idx
 
         else:
             # Only P1? Fallback to P1 (shouldn't happen with >= 2 check)
@@ -766,10 +791,6 @@ def find_peaks_t1_t2(
 
         tau = time[fit_idx] - time[p1_idx]
         amp = detection_signal[fit_idx]
-
-        print(
-            f"DEBUG find_peaks_t1_t2: peaks={peaks[:10] if len(peaks) > 10 else peaks}, fit_idx={fit_idx}, candidates[:5]={candidates[:5] if len(candidates) > 0 else []}"
-        )
 
         return (
             p1_idx,
@@ -824,8 +845,23 @@ def preprocess_data(
     else:
         # T2 / T2 Multiple Logic (t2_analysis.py / Snippet)
         # 1. Find Global Max (Time Zero) on SIGNED signal
-        # "max_idx = np.argmax(data.signal)"
-        start_idx = np.argmax(signal)
+        # Modified Logic: "First appeared peak... height >= 80% highest value"
+
+        # Determine strict threshold
+        global_max = np.max(signal)
+        threshold = 0.8 * global_max
+
+        # Find peaks with height >= threshold
+        # We need basic peak finding here to identify candidates
+        # Use simple parameters as we just want strict dominant peaks
+        t2_peaks, _ = find_peaks(signal, height=threshold, distance=100)
+
+        if len(t2_peaks) > 0:
+            # Take the FIRST peak that meets the criteria
+            start_idx = t2_peaks[0]
+        else:
+            # Fallback: Just global max if no peaks found (unlikely)
+            start_idx = np.argmax(signal)
 
     # Slice and Shift
     new_time = time[start_idx:] - time[start_idx]
