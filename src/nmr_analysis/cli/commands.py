@@ -613,7 +613,7 @@ def montage(
 
         # Data
         time = ctx.data.time
-        signal = np.abs(ctx.data.signal)
+        signal = np.real(ctx.data.signal)  # Use Signed Signal (User Request)
 
         # Fit
         fit_curve = ctx.result.fit_curve
@@ -823,9 +823,9 @@ def _run_analysis(
                     fit_idx = peak_info.get("fit_idx", 0)
                     sig = processed_data.signal
                     if fit_idx < len(sig):
-                        amp = np.abs(sig[fit_idx])
+                        amp = np.real(sig[fit_idx])
                     else:
-                        amp = np.max(np.abs(sig))
+                        amp = np.max(np.real(sig))
 
                     # Use ACTUAL detected delay from signal (tau_fitted) for the fit
                     # This ensures the X-axis matches the "Fit Peak" locations
@@ -2300,8 +2300,10 @@ def plot_stacked_traces(
         ax_raw = axes[i, 1]  # Column 2: Full Raw
         color = cmap(norm(i))
 
-        proc_signal = np.abs(processed_data.signal)
-        full_signal = np.abs(data_full.signal)
+        # User Request: "It still seems to take the absoulte value"
+        # Use Real (Signed) signal for plotting
+        proc_signal = np.real(processed_data.signal)
+        full_signal = np.real(data_full.signal)
 
         # --- COLUMN 1: Processed Data with Peaks ---
         ax_proc.plot(
@@ -2448,7 +2450,8 @@ def plot_analysis_summary(
             continue
 
         color = cmap(norm(i))
-        signal = np.abs(data.signal)
+        # User Request: "It still seems to take the absoulte value"
+        signal = np.real(data.signal)
         # Raw trace (faint)
         ax_traces.plot(data.time, signal, color=color, alpha=0.3)
 
@@ -2541,15 +2544,36 @@ def plot_analysis_summary(
         if num_traces <= 5:
             ax_right.legend(loc="best", fontsize=8)
     else:
-        # Original log-scale fit plot
         # Plot data points
         ax_right.scatter(x, y, c="blue", label="Data Points", zorder=3)
 
-        # Fit Curve
+        # Fit Curve - use dense grid for J-modulated to show oscillations
         if result.fit_curve is not None:
-            sorted_pairs = sorted(zip(x, result.fit_curve))
-            sx, sy = zip(*sorted_pairs)
-            ax_right.plot(sx, sy, label="Fit", color="red", linestyle="--", zorder=6)
+            if "J" in result.params:
+                # J-modulated: generate dense curve to show oscillations
+                from nmr_analysis.analysis.models import j_modulated_t2
+
+                t_dense = np.linspace(np.min(x), np.max(x), 500)
+                M0 = result.params["M0"]
+                T2 = result.params["T2"]
+                J = result.params["J"]
+                offset = result.params.get("offset", 0.0)
+                fit_dense = j_modulated_t2(t_dense, M0, T2, J, offset)
+                ax_right.plot(
+                    t_dense,
+                    fit_dense,
+                    label="Fit",
+                    color="red",
+                    linestyle="--",
+                    zorder=6,
+                )
+            else:
+                # Standard fit: use original sparse points
+                sorted_pairs = sorted(zip(x, result.fit_curve))
+                sx, sy = zip(*sorted_pairs)
+                ax_right.plot(
+                    sx, sy, label="Fit", color="red", linestyle="--", zorder=6
+                )
 
         # Add fit annotations with errors
         if "T1" in result.params:  # T1 Case
@@ -2617,26 +2641,26 @@ def plot_analysis_summary(
 
 
 if __name__ == "__main__":
-    # for week in (
-    #     "4.1",
-    #     "4.2",
-    #     "5.1",
-    #     "5.2",
-    # ):
-    #     week_path = Path(rf"H:\My Drive\Lab C\NMR\week{week}")
-    #     if not week_path.exists():
-    #         console.print(f"[yellow]Skipping week {week}: directory not found[/yellow]")
-    #         continue
-        # analyze(
-        #     week_path,
-        #     experiment=None,
-        #     channel="Channel 1",
-        #     plot=True,
-        #     save_plots=True,
-        #     output_dir=Path(__file__).parents[3] / "output" / week,
-        #     interactive=False,
-        #     flat=True,
-        # )
+    for week in (
+        "4.1",
+        "4.2",
+        "5.1",
+        "5.2",
+    ):
+        week_path = Path(rf"H:\My Drive\Lab C\NMR\week{week}")
+        if not week_path.exists():
+            console.print(f"[yellow]Skipping week {week}: directory not found[/yellow]")
+            continue
+        analyze(
+            week_path,
+            experiment=None,
+            channel="Channel 1",
+            plot=True,
+            save_plots=True,
+            output_dir=Path(__file__).parents[3] / "output" / week,
+            interactive=False,
+            flat=True,
+        )
     montage(
         Path(rf"H:\My Drive\Lab C\NMR"),
         output_file=Path(__file__).parents[3] / "output" / "montage",

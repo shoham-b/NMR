@@ -679,7 +679,9 @@ def find_peaks_t1_t2(
     # --- T2 LOGIC (from NMRMINE t2_analysis.py) ---
     else:
         # Default to T2 behavior
-        detection_signal = np.abs(signal)
+        # User Request: "Is the absoulte value... It harms the peak finding" -> Use SIGNED signal
+        # detection_signal = np.abs(signal)
+        detection_signal = signal
         # T2 repo doesn't explicitly mention DC offset, just "max_idx = argmax... slice... find_peaks"
 
         max_val = np.max(detection_signal)
@@ -786,47 +788,43 @@ def find_peaks_t1_t2(
                 # Let's simplify: Maximize y_cand relative to expected decay.
                 # Effectively, we maximize T2.
 
-                # Safe Log:
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    # ratio = y0 / y. If y >= y0, ratio <= 1 -> log <= 0.
-                    # If y <= 0, we set T2 = 0 manually.
+                # User Request (Update): "remove smoothing before finding peaks"
+                # We revert to using raw detection_signal values.
 
-                    # We utilize the fact that minimizing (ln(y0) - ln(y)) maximizes T2.
-                    # denom = ln(y0/y).
-                    # If y >= y0, denom <= 0.
-                    # If y < y0, denom > 0.
+                # Use raw P1 amplitude
+                y0_raw = detection_signal[p1_idx]
+                if y0_raw <= 0:
+                    y0_raw = 1e-9
 
-                    # Let's compute manually to handle edge cases cleanly
-                    best_idx = valid_indices[0]
-                    max_t2 = -1.0
+                best_idx = valid_indices[0] if len(valid_indices) > 0 else 0
+                max_t2 = -1.0
 
-                    # Optimization: Filter out y <= 0 first (noise floor)
-                    # (Unless everything is <= 0?)
+                for i in range(len(valid_indices)):
+                    idx = valid_indices[i]
+                    y = y_cands[i]  # Use Raw Value (Signed)
+                    t = t_cands[i]
 
-                    for i in range(len(valid_indices)):
-                        idx = valid_indices[i]
-                        y = y_cands[i]
-                        t = t_cands[i]
+                    # Threshold Check (User: "above 5") - apply to raw signal
+                    # If this filters too much noise, good.
+                    if y <= 5.0:
+                        continue
 
-                        if y <= 0:
-                            calc_t2 = 0.0
-                        elif y >= y0:
-                            # Higher than P1? Infinite T2.
-                            # Differentiate by Amplitude?
-                            # If multiple points are > P1, the one with HIGHEST Amplitude is "most outer".
-                            # We map this to a very large number + amplitude buffer
-                            calc_t2 = 1e9 + y
+                    if y >= y0_raw:
+                        # Higher than P1? Infinite T2.
+                        # Differentiate by Amplitude?
+                        # Maximize Outer Envelope -> Highest Amplitude
+                        calc_t2 = 1e9 + y
+                    else:
+                        # Normal Decay
+                        denom = np.log(y0_raw) - np.log(y)
+                        if denom == 0:
+                            calc_t2 = 1e9
                         else:
-                            # Normal Decay
-                            denom = np.log(y0) - np.log(y)
-                            if denom == 0:
-                                calc_t2 = 1e9
-                            else:
-                                calc_t2 = (t - t0) / denom
+                            calc_t2 = (t - t0) / denom
 
-                        if calc_t2 > max_t2:
-                            max_t2 = calc_t2
-                            best_idx = idx
+                    if calc_t2 > max_t2:
+                        max_t2 = calc_t2
+                        best_idx = idx
 
                     fit_idx = best_idx
             else:
@@ -880,7 +878,8 @@ def preprocess_data(
         signal_corr = signal - dc_offset
         # 2. Use Absolute Signal for Start Detection
         # "max_idx = np.argmax(abs_signal)"
-        detection_signal = np.abs(signal_corr)
+        # User Request: "It harms the peak finding" -> Use Signed Signal to find positive peaks
+        detection_signal = signal_corr
         start_idx = np.argmax(detection_signal)
 
         # We perform the slicing on the ORIGINAL time/signal (but signal might need DC corr?)

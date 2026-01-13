@@ -114,28 +114,43 @@ class Fitter:
         delays: np.ndarray, amplitudes: np.ndarray, guess_J: float = 7.0
     ) -> Tuple[dict, np.ndarray, np.ndarray, float, dict]:
         """
-        Fit J-Modulated T2 Spin Echo decay.
+        Fit J-Modulated T2 Spin Echo decay using a two-stage approach.
+
+        Stage 1: Fit simple exponential decay to get T2/M0 estimates.
+        Stage 2: Use Stage 1 results as initial guesses for full J-modulated fit.
+
         Model: | M0 * exp(-t/T2) * cos(pi*J*t) | + offset
-        Recommended guess_J: 7.0 Hz (typical for H-H coupling)
         """
         from nmr_analysis.analysis.models import j_modulated_t2
 
+        # ===== Stage 1: Fit Exponential Decay Envelope =====
+        # This gives robust T2 and M0 estimates ignoring modulation
         M0_guess = np.max(amplitudes) if len(amplitudes) > 0 else 1.0
         T2_guess = np.mean(delays) if len(delays) > 0 else 0.5
-        offset_guess = 0.0
-
-        # p0: [M0, T2, J, offset]
-        p0 = [M0_guess, T2_guess, guess_J, offset_guess]
+        offset_guess = np.min(amplitudes) if len(amplitudes) > 0 else 0.0
 
         try:
-            # Bounds: M0>0, T2>0, J>0, offset can be whatever (usually >0)
+            popt_stage1, _ = curve_fit(
+                t2_decay_model,
+                delays,
+                amplitudes,
+                p0=[M0_guess, T2_guess, offset_guess],
+                bounds=([0, 0, -np.inf], [np.inf, np.inf, np.inf]),
+                maxfev=5000,
+            )
+            M0_stage1, T2_stage1, offset_stage1 = popt_stage1
+        except (RuntimeError, ValueError):
+            # Fallback to initial guesses if Stage 1 fails
+            M0_stage1, T2_stage1, offset_stage1 = M0_guess, T2_guess, offset_guess
+
+        # ===== Stage 2: Fit Full J-Modulated Model =====
+        # Use Stage 1 results as initial guesses
+        p0 = [M0_stage1, T2_stage1, guess_J, offset_stage1]
+
+        try:
+            # Bounds: M0>0, T2>0, J>0, offset can be anything
             bounds_min = [0, 0, 0, -np.inf]
-            bounds_max = [
-                np.inf,
-                np.inf,
-                20.0,
-                np.inf,
-            ]  # Limit J < 20Hz for typical H-H?
+            bounds_max = [np.inf, np.inf, 20.0, np.inf]  # Limit J < 20Hz
 
             popt, pcov = curve_fit(
                 j_modulated_t2,
@@ -143,6 +158,7 @@ class Fitter:
                 amplitudes,
                 p0=p0,
                 bounds=(bounds_min, bounds_max),
+                maxfev=10000,
             )
             M0, T2, J, offset = popt
             fit_curve = j_modulated_t2(delays, *popt)
