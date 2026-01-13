@@ -727,11 +727,16 @@ def find_peaks_t1_t2(
                 },
             )
 
-        p1_idx = peaks[0]  # Should be global max ideally
-        p1_idx = peaks[0]
-        # Remaining peaks (Echoes)
-        # If we have >= 3 peaks (P1, P2, P3...):
-        # Compare P2 (idx 1) and P3 (idx 2)
+        # FORCE P1 to be Global Max/Start (index 0 of trimmed data)
+        # Preprocessing guarantees data starts at the "First Peak" (Outer Envelope Start)
+        p1_idx = 0
+
+        # Ensure 0 is in peaks list for visualization
+        if 0 not in peaks:
+            peaks = np.insert(peaks, 0, 0)
+
+        # Remaining peaks (Echoes) logic below scans ALL points, so peaks array is mainly for Viz.
+
         # Selection Logic
         # User Request: "the one that... maximizes a" (in e^-ax) + "longest decay".
         # Interpreted as: Maximize Time Constant T2 (Slowest Decay).
@@ -907,6 +912,33 @@ def preprocess_data(
         if len(t2_peaks) > 0:
             # Take the FIRST peak that meets the criteria
             start_idx = t2_peaks[0]
+
+            # --- USER REQUEST REFINEMENT ---
+            # "iterate to take the higher one which is the true peak, but only if it is in the near environment"
+            # If we picked a small artifact (e.g. 33% max) but the REAL global max is just 2ms later, switch to it.
+
+            # Look at subsequent peaks
+            for i in range(1, len(t2_peaks)):
+                next_peak_idx = t2_peaks[i]
+
+                # Check 1: Near Environment? (e.g. within 0.05s)
+                # Typically artifacts are very close to the pulse.
+                time_diff = time[next_peak_idx] - time[start_idx]
+                if time_diff > 0.05:  # Limit search to near environment
+                    break
+
+                # Check 2: Is it Higher?
+                # If subsequent peak is higher, we assume the previous one was a pre-pulse artifact
+                amp_curr = signal[start_idx]
+                amp_next = signal[next_peak_idx]
+
+                if amp_next > amp_curr:
+                    # Switch P1 to this higher peak
+                    start_idx = next_peak_idx
+                else:
+                    # If next peak is LOWER, then the current start_idx is likely the main pulse
+                    # (and next one is decay or noise). We stop here.
+                    break
         else:
             # Fallback: Just global max if no peaks found (unlikely)
             start_idx = np.argmax(signal)
