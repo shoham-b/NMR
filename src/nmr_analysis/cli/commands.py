@@ -667,7 +667,7 @@ def montage(
                 depth_val = ctx.result.params["depth"]
                 info_text += f"\nJ: {j_val:.2f} Hz\nd: {depth_val:.2f}"
 
-        except:
+        except Exception:
             info_text = "N/A"
 
         # Labels

@@ -230,17 +230,44 @@ class Fitter:
             amps_s1 = amplitudes[semilog_mask_inliers]
 
             # Use soft_l1 for initial fit
+            # Use soft_l1 for initial fit
             try:
                 popt, pcov = curve_fit(
-                    t2_decay_model, delays_s1, amps_s1, p0=p0, loss="soft_l1"
+                    t2_decay_model,
+                    delays_s1,
+                    amps_s1,
+                    p0=p0,
+                    loss="soft_l1",
+                    maxfev=50000,
+                    ftol=1e-13,
+                    xtol=1e-13,
+                    gtol=1e-13,
                 )
             except TypeError:
-                popt, pcov = curve_fit(t2_decay_model, delays_s1, amps_s1, p0=p0)
+                popt, pcov = curve_fit(
+                    t2_decay_model,
+                    delays_s1,
+                    amps_s1,
+                    p0=p0,
+                    maxfev=50000,
+                    ftol=1e-13,
+                    xtol=1e-13,
+                    gtol=1e-13,
+                )
 
         except (RuntimeError, ValueError):
             # Fallback to fit on everything
             try:
-                popt, pcov = curve_fit(t2_decay_model, delays, amplitudes, p0=p0)
+                popt, pcov = curve_fit(
+                    t2_decay_model,
+                    delays,
+                    amplitudes,
+                    p0=p0,
+                    maxfev=50000,
+                    ftol=1e-13,
+                    xtol=1e-13,
+                    gtol=1e-13,
+                )
             except (RuntimeError, ValueError):
                 return (
                     {},
@@ -264,7 +291,14 @@ class Fitter:
                 amps_clean = amplitudes[~outlier_mask]
 
                 popt_clean, pcov_clean = curve_fit(
-                    t2_decay_model, delays_clean, amps_clean, p0=popt, maxfev=10000
+                    t2_decay_model,
+                    delays_clean,
+                    amps_clean,
+                    p0=popt,
+                    maxfev=50000,
+                    ftol=1e-13,
+                    xtol=1e-13,
+                    gtol=1e-13,
                 )
                 popt = popt_clean
                 pcov = pcov_clean
@@ -338,7 +372,10 @@ class Fitter:
                 amplitudes_stage1,
                 p0=[M0_guess, T2_guess, offset_guess],
                 bounds=([0, 0, -np.inf], [np.inf, np.inf, np.inf]),
-                maxfev=5000,
+                maxfev=50000,
+                ftol=1e-13,
+                xtol=1e-13,
+                gtol=1e-13,
             )
             M0_stage1, T2_stage1, offset_stage1 = popt_stage1
         except (RuntimeError, ValueError):
@@ -415,7 +452,10 @@ class Fitter:
                 amplitudes_final,
                 p0=p0,
                 bounds=(bounds_min, bounds_max),
-                maxfev=10000,
+                maxfev=100000,
+                ftol=1e-13,
+                xtol=1e-13,
+                gtol=1e-13,
             )
             M0, T2, J, offset, depth = popt
             fit_curve = j_modulated_t2(delays, M0, T2, J, offset, depth)
