@@ -21,14 +21,15 @@ def test_j_modulated_fit_synthetic():
     # Perfect data
     y_true = j_modulated_t2(delays, M0, T2, J, offset)
 
-    # Add noise?
+    # Add noise with fixed seed for reproducibility
+    np.random.seed(42)
     noise = np.random.normal(0, 1.0, len(delays))
     y_noisy = y_true + noise
 
     # 2. Fit
     # Guess J=6.0 to make it work for it
-    results_dict, fit_curve, residuals, r2, errors = Fitter.fit_modulated_t2(
-        delays, y_noisy, guess_J=6.0
+    results_dict, fit_curve, residuals, r2, errors, outlier_mask = (
+        Fitter.fit_modulated_t2(delays, y_noisy, guess_J=6.0)
     )
 
     print("\nFit Results:")

@@ -1,0 +1,24 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.14.0, pytest-9.0.2, pluggy-1.6.0
+rootdir: C:\Users\shoha\git\NMR
+configfile: pyproject.toml
+plugins: anyio-4.12.0
+collected 49 items
+
+tests\nmr_analysis\test_hybrid.py .                                      [  2%]
+tests\nmr_analysis\test_j_modulation.py F
+
+================================== FAILURES ===================================
+_______________________ test_j_modulated_fit_synthetic ________________________
+tests\nmr_analysis\test_j_modulation.py:38: in test_j_modulated_fit_synthetic
+    assert r2 > 0.95, f"R2 {r2} is too low"
+E   AssertionError: R2 0.40013688171152384 is too low
+E   assert np.float64(0.40013688171152384) > 0.95
+---------------------------- Captured stdout call -----------------------------
+
+Fit Results:
+{'M0': np.float64(94.08476739567674), 'T2': np.float64(0.28529509266153197), 'J': np.float64(19.521135487919047), 'offset': np.float64(22.740168380074497), 'depth': np.float64(0.8469640787522457)}
+=========================== short test summary info ===========================
+FAILED tests/nmr_analysis/test_j_modulation.py::test_j_modulated_fit_synthetic
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!
+========================= 1 failed, 1 passed in 3.73s =========================

@@ -8,13 +8,14 @@ def test_t1_fitting():
     delays = np.linspace(0, 10, 20)
     M0 = 100.0
     T1 = 2.5
+    alpha = 1.0
 
     # M(t) = M0 * (1 - 2 * alpha * exp(-t / T1))
-    signal = t1_model(delays, M0, T1)
+    signal = t1_model(delays, M0, T1, alpha)
     # Add noise
     signal += np.random.normal(0, 1.0, size=delays.shape)
 
-    params, fit_curve, residuals, r2, perr = Fitter.fit_t1(delays, signal)
+    params, fit_curve, residuals, r2, perr, outlier_mask = Fitter.fit_t1(delays, signal)
 
     assert r2 > 0.95
     assert np.isclose(params["M0"], M0, rtol=0.2)
@@ -30,7 +31,7 @@ def test_t2_fitting():
     signal = t2_decay_model(delays, M0, T2, 0.0)
     signal += np.random.normal(0, 1.0, size=delays.shape)
 
-    params, fit_curve, residuals, r2, perr = Fitter.fit_t2(delays, signal)
+    params, fit_curve, residuals, r2, perr, outlier_mask = Fitter.fit_t2(delays, signal)
 
     assert r2 > 0.95
     assert np.isclose(params["M0"], M0, rtol=0.2)
