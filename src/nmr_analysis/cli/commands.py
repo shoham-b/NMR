@@ -12,7 +12,6 @@ from rich.table import Table
 from scipy.ndimage import gaussian_filter1d
 
 from nmr_analysis.analysis.fitting import Fitter
-from nmr_analysis.analysis.hybrid import analyze_spectral_series, HybridAnalysisResult
 from nmr_analysis.analysis.models import t2_decay_model, j_modulated_t2
 from nmr_analysis.analysis.processing import (
     extract_echo_train,
@@ -1035,47 +1034,6 @@ def _run_analysis(
                     smoothing=ANALYSIS_SMOOTHING,
                     show_fourier=True,
                 )
-
-            # --- ALSO run Hybrid Spectral Analysis (Supplementary) ---
-            console.print(
-                "[bold green]Running Supplementary Spectral Analysis...[/bold green]"
-            )
-
-            hybrid_res = analyze_spectral_series(data_list, names)
-
-            # Print Summary
-            console.print(
-                f"[bold]Spectral Analysis Details: {hybrid_res.dataset_name}[/bold]"
-            )
-            table = Table(title="Spectral T2 Results (Per Frequency Peak)")
-            table.add_column("Peak Freq (Hz)", justify="right")
-            table.add_column("T2 (s)", justify="right")
-            table.add_column("M0", justify="right")
-            table.add_column("R2 Score", justify="right")
-
-            for i, res in enumerate(hybrid_res.t2_results):
-                f0 = hybrid_res.peak_centers[i]
-                t2 = res.get("T2", 0)
-                m0 = res.get("M0", 0)
-                r2 = res.get("r_squared", 0)
-                table.add_row(f"{f0:.2f}", f"{t2:.4f}", f"{m0:.2e}", f"{r2:.4f}")
-
-            console.print(table)
-
-            if plot:
-                out_dir = save_path if save_path else target_files[0].parent
-                try:
-                    plot_hybrid_result(
-                        hybrid_res,
-                        out_dir,
-                        source_path=path,
-                        prefix=prefix,
-                    )
-                    console.print("[green]Spectral detail plots saved.[/green]")
-                except Exception as e:
-                    console.print(
-                        f"[yellow]Could not plot spectral details: {e}[/yellow]"
-                    )
 
             # Return standard T2 result as primary (consistent with other materials)
             aggregated_data = NMRData(time=td_delays, signal=td_amplitudes)
