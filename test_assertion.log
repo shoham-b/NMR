@@ -1,6 +1,6 @@
 Assertion Failed: assert False
  +  where False = exists()
- +    where exists = WindowsPath('C:/Users/shoha/AppData/Local/Temp/pytest-of-shoha/pytest-53/test_flat_output_structure0/output/summary.csv').exists
+ +    where exists = WindowsPath('C:/Users/shoha/AppData/Local/Temp/pytest-of-shoha/pytest-69/test_flat_output_structure0/output/summary.csv').exists
 STDOUT:
 Detected Sample Directory: Sample1
 ─────────────── Sample Analysis: Sample1/Diffusion (diffusion) ────────────────

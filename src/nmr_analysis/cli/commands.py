@@ -24,6 +24,7 @@ from nmr_analysis.core.types import ExperimentType, AnalysisResult, NMRData
 from nmr_analysis.io.loader import get_loader
 from nmr_analysis.io.reporting import save_summary_csv
 from nmr_analysis.visualization.interactive import generate_dashboard, AnalysisContext
+from nmr_analysis.core.caching import CacheManager
 
 ANALYSIS_SMOOTHING = 2.6
 
@@ -178,16 +179,6 @@ def _generate_plot_filename(
     parts.append(graph_type)
 
     return "_".join(parts) + ".png"
-
-
-@app.command()
-def gui():
-    """
-    Launch the NMR Analysis Web GUI.
-    """
-    from nmr_analysis.gui.app import main as gui_main
-
-    gui_main()
 
 
 @app.command()
@@ -715,13 +706,30 @@ def montage(
 
     for res in results:
         week = res["week"]
+
+        # User Request: Don't show week 4.1
+        if week == "week4.1":
+            continue
+
         percent = res["percent"]
         ctx = res["context"]
 
         try:
-            t2_val = ctx.result.params.get("T2", None)
-            # Try to get error if available (standard error)
-            t2_err = ctx.result.errors.get("T2", 0.0) if ctx.result.errors else 0.0
+            # Use Unmodulated T2 if available (User Request)
+            t2_val = ctx.result.params.get(
+                "T2_unmodulated", ctx.result.params.get("T2", None)
+            )
+
+            # Get corresponding error
+            # Note: AnalysisResult uses 'param_errors', fixing potential bug where 'errors' was used
+            errors = (
+                ctx.result.param_errors if hasattr(ctx.result, "param_errors") else {}
+            )
+
+            if "T2_unmodulated" in ctx.result.params:
+                t2_err = errors.get("T2_unmodulated", 0.0)
+            else:
+                t2_err = errors.get("T2", 0.0)
 
             if t2_val is not None:
                 if week not in series_data:
@@ -753,7 +761,7 @@ def montage(
             percents,
             t2s,
             yerr=errors,
-            fmt="o-",
+            fmt="o",  # Just dots, no line
             linewidth=2,
             markersize=8,
             capsize=4,
@@ -820,7 +828,22 @@ def _run_analysis(
                 loader = get_loader(target_file, channel=channel)
                 data = loader.load(target_file)
                 console.print(f"Fitting T2* for {target_file.name}...")
-                result = Fitter.fit_t2_star(data)
+
+                # --- Caching Start ---
+                cache_params = {
+                    "experiment": "t2_star",
+                    "smoothing": ANALYSIS_SMOOTHING,
+                }
+                result = CacheManager.get(target_file, cache_params)
+
+                if result is None:
+                    result = Fitter.fit_t2_star(data)
+                    CacheManager.set(target_file, cache_params, result)
+                else:
+                    console.print(
+                        f"[green]Loaded cached T2* result for {target_file.name}[/green]"
+                    )
+                # --- Caching End ---
                 # Add week/substance to dataset name
                 week, substance = _get_week_and_substance(target_file, prefix)
                 title_prefix = (
@@ -967,9 +990,51 @@ def _run_analysis(
             td_amplitudes = np.array(td_amplitudes)
 
             # Fit T2 (Time Domain)
-            params, fit_curve, residuals, r2, param_errors, outlier_mask = (
-                Fitter.fit_t2(td_delays, td_amplitudes)
-            )
+            # --- Caching Start ---
+            # We cache based on the directory path for Hybrid/Combined T2 analysis
+            # Since input 'path' is a directory, verify what to use.
+            # Here 'target_files' are processed into arrays. Caching key could be based on list of files?
+            # Or just the directory + mtime. CacheManager handles directory hashing now.
+
+            cache_params = {"experiment": "t2_hybrid", "type": "time_domain"}
+            td_result = CacheManager.get(path, cache_params)
+
+            if td_result is None:
+                params, fit_curve, residuals, r2, param_errors, outlier_mask = (
+                    Fitter.fit_t2(td_delays, td_amplitudes)
+                )
+
+                # Create result object locally to cache it
+                # Determine name locally (code duplication from below but necessary for constructing object)
+                week, substance = _get_week_and_substance(path, prefix)
+                title_prefix = (
+                    f"{week} {substance}".strip()
+                    if week or substance != "mineral-oil"
+                    else ""
+                )
+                dataset_label = path.name if path.is_dir() else path.parent.name
+                td_name = (
+                    f"{title_prefix} - T2 Analysis: {dataset_label}"
+                    if title_prefix
+                    else f"T2 Analysis: {dataset_label}"
+                )
+
+                td_result = AnalysisResult(
+                    experiment_type=ExperimentType.T2,
+                    dataset_name=td_name,
+                    params=params,
+                    fit_curve=fit_curve,
+                    residuals=residuals,
+                    r_squared=r2,
+                    param_errors=param_errors,
+                    metadata={"outlier_mask": outlier_mask},
+                )
+                CacheManager.set(path, cache_params, td_result)
+            else:
+                console.print(
+                    f"[green]Loaded cached Hybrid T2 result for {path.name}[/green]"
+                )
+            # --- Caching End ---
 
             # Determine experiment name from directory with week/substance
             week, substance = _get_week_and_substance(path, prefix)
@@ -1120,7 +1185,22 @@ def _run_analysis(
 
                     # 2. Fit Time Domain T2* (Standard)
                     console.print("Fitting T2* (Time Domain)...")
-                    result = Fitter.fit_t2_star(data)
+
+                    # --- Caching Start ---
+                    cache_params = {
+                        "experiment": "t2_star_spectrum",
+                        "smoothing": ANALYSIS_SMOOTHING,
+                    }
+                    result = CacheManager.get(target_file, cache_params)
+
+                    if result is None:
+                        result = Fitter.fit_t2_star(data)
+                        CacheManager.set(target_file, cache_params, result)
+                    else:
+                        console.print(
+                            f"[green]Loaded cached T2* result for {target_file.name}[/green]"
+                        )
+                    # --- Caching End ---
 
                     # Add dataset name
                     if len(target_files) > 1:
@@ -1312,9 +1392,25 @@ def _run_analysis(
                 f"Using fixed R2 intercept: {fixed_intercept:.4f} s^-1 (from T2={fixed_t2:.4f} s)"
             )
 
-        result = Fitter.fit_diffusion(
-            taus, rates, gradient_strength=gradient, fixed_intercept=fixed_intercept
-        )
+        # --- Caching Start ---
+        cache_params = {
+            "experiment": "diffusion",
+            "fixed_t2": fixed_t2,
+            "gradient": gradient,
+        }
+        # Use first file as key or directory? Path is directory.
+        result = CacheManager.get(path, cache_params)
+
+        if result is None:
+            result = Fitter.fit_diffusion(
+                taus, rates, gradient_strength=gradient, fixed_intercept=fixed_intercept
+            )
+            CacheManager.set(path, cache_params, result)
+        else:
+            console.print(
+                f"[green]Loaded cached Diffusion result for {path.name}[/green]"
+            )
+        # --- Caching End ---
 
         print_result(result)
 
@@ -1504,31 +1600,53 @@ def _run_analysis(
         # Standard T2 fit: M(t) = M0 exp(-t/T2)
         # Delays are peak_times
 
-        # Re-use T2 fitting logic
-        params, fit_curve, residuals, r2, param_errors, outlier_mask = Fitter.fit_t2(
-            peak_times, peak_amps
-        )
+        # Fit T2 to the peaks
+        # Using 0 as initial time? Use relative time?
+        # Standard T2 fit: M0 * exp(-t/T2)
+        # Delays are peak_times
 
-        # Add week/substance to dataset name
-        week, substance = _get_week_and_substance(path, prefix)
-        title_prefix = (
-            f"{week} {substance}".strip() if week or substance != "mineral-oil" else ""
-        )
-        combined_name = (
-            f"{title_prefix} - Spin Echo (Echo Train)"
-            if title_prefix
-            else "Spin Echo (Echo Train)"
-        )
-        result = AnalysisResult(
-            experiment_type=experiment,
-            dataset_name=combined_name,
-            params=params,
-            fit_curve=fit_curve,
-            residuals=residuals,
-            r_squared=r2,
-            param_errors=param_errors,
-            metadata={"outlier_mask": outlier_mask},
-        )
+        # --- Caching Start ---
+        cache_params = {
+            "experiment": "t2_combined",
+            "extracted_peak_count": len(peak_times),
+            "smoothing": ANALYSIS_SMOOTHING,
+        }
+        result = CacheManager.get(target_file, cache_params)
+
+        if result is None:
+            params, fit_curve, residuals, r2, param_errors, outlier_mask = (
+                Fitter.fit_t2(peak_times, peak_amps)
+            )
+
+            # Add week/substance to dataset name
+            week, substance = _get_week_and_substance(path, prefix)
+            title_prefix = (
+                f"{week} {substance}".strip()
+                if week or substance != "mineral-oil"
+                else ""
+            )
+            combined_name = (
+                f"{title_prefix} - Spin Echo (Echo Train)"
+                if title_prefix
+                else "Spin Echo (Echo Train)"
+            )
+            result = AnalysisResult(
+                experiment_type=experiment,
+                dataset_name=combined_name,
+                params=params,
+                fit_curve=fit_curve,
+                residuals=residuals,
+                r_squared=r2,
+                param_errors=param_errors,
+                metadata={"outlier_mask": outlier_mask},
+            )
+            CacheManager.set(target_file, cache_params, result)
+        else:
+            console.print(
+                f"[green]Loaded cached T2 Combined result for {target_file.name}[/green]"
+            )
+        # --- Caching End ---
+
         print_result(result)
         if plot:
             # We want: Raw Data + Peaks + Fit Curve on ONE graph
@@ -1746,49 +1864,21 @@ def _run_analysis(
         raw_traces.sort(key=lambda x: x[6])
 
         console.print("Fitting data...")
-        outlier_mask = None
-        if experiment == ExperimentType.T1:
-            params, fit_curve, residuals, r2, param_errors, outlier_mask = (
-                Fitter.fit_t1(delays, amplitudes_fit)
-            )
-            week, substance = _get_week_and_substance(path, prefix)
-            title_prefix = (
-                f"{week} {substance}".strip()
-                if week or substance != "mineral-oil"
-                else ""
-            )
-            dataset_name = (
-                f"{title_prefix} - T1 Analysis" if title_prefix else "T1 Analysis"
-            )
-        else:  # T2
-            # Check for Alcohol (J-Modulated Analysis)
-            # Heuristic: If dataset name ends with "nol" (e.g. Ethanol, Methanol)
-            # Or if user explicitly requested alcohol handling (though we rely on path mostly)
-            # We check path.name or path.parent.name
-            target_name = path.name.lower()
-            parent_name = path.parent.name.lower()
 
-            # Helper to check if any word in a name contains "nol"
-            def _contains_nol_word(name: str) -> bool:
-                # Split on common separators: space, underscore, hyphen
-                words = re.split(r"[\s_\-]+", name)
-                return any("nol" in word for word in words)
+        # --- Caching Start ---
+        cache_params = {
+            "experiment": "t1" if experiment == ExperimentType.T1 else "t2",
+            "smoothing": ANALYSIS_SMOOTHING,
+            "data_count": len(delays),
+        }
+        # Use directory path as key
+        result = CacheManager.get(path, cache_params)
 
-            if (
-                target_name.endswith("nol")
-                or "alcohol" in target_name
-                or _contains_nol_word(target_name)
-                or parent_name.endswith("nol")
-                or "alcohol" in parent_name
-                or _contains_nol_word(parent_name)
-                or (path / "ethanol_percent.txt").exists()
-                or (path.parent / "ethanol_percent.txt").exists()
-            ):
-                console.print(
-                    "[cyan]Alcohol dataset detected: Using J-Modulated T2 Fit[/cyan]"
-                )
+        if result is None:
+            outlier_mask = None
+            if experiment == ExperimentType.T1:
                 params, fit_curve, residuals, r2, param_errors, outlier_mask = (
-                    Fitter.fit_modulated_t2(delays, amplitudes_fit)
+                    Fitter.fit_t1(delays, amplitudes_fit)
                 )
                 week, substance = _get_week_and_substance(path, prefix)
                 title_prefix = (
@@ -1797,34 +1887,84 @@ def _run_analysis(
                     else ""
                 )
                 dataset_name = (
-                    f"{title_prefix} - T2 Analysis (J-Modulated)"
-                    if title_prefix
-                    else "T2 Analysis (J-Modulated)"
+                    f"{title_prefix} - T1 Analysis" if title_prefix else "T1 Analysis"
                 )
-            else:
-                params, fit_curve, residuals, r2, param_errors, outlier_mask = (
-                    Fitter.fit_t2(delays, amplitudes_fit)
-                )
-                week, substance = _get_week_and_substance(path, prefix)
-                title_prefix = (
-                    f"{week} {substance}".strip()
-                    if week or substance != "mineral-oil"
-                    else ""
-                )
-                dataset_name = (
-                    f"{title_prefix} - T2 Analysis" if title_prefix else "T2 Analysis"
-                )
+            else:  # T2
+                # Check for Alcohol (J-Modulated Analysis)
+                # Heuristic: If dataset name ends with "nol" (e.g. Ethanol, Methanol)
+                # Or if user explicitly requested alcohol handling (though we rely on path mostly)
+                # We check path.name or path.parent.name
+                target_name = path.name.lower()
+                parent_name = path.parent.name.lower()
 
-        result = AnalysisResult(
-            experiment_type=experiment,
-            dataset_name=dataset_name,
-            params=params,
-            fit_curve=fit_curve,
-            residuals=residuals,
-            r_squared=r2,
-            param_errors=param_errors,
-            metadata={"outlier_mask": outlier_mask} if outlier_mask is not None else {},
-        )
+                # Helper to check if any word in a name contains "nol"
+                def _contains_nol_word(name: str) -> bool:
+                    # Split on common separators: space, underscore, hyphen
+                    words = re.split(r"[\s_\-]+", name)
+                    return any("nol" in word for word in words)
+
+                if (
+                    target_name.endswith("nol")
+                    or "alcohol" in target_name
+                    or _contains_nol_word(target_name)
+                    or parent_name.endswith("nol")
+                    or "alcohol" in parent_name
+                    or _contains_nol_word(parent_name)
+                    or (path / "ethanol_percent.txt").exists()
+                    or (path.parent / "ethanol_percent.txt").exists()
+                ):
+                    console.print(
+                        "[cyan]Alcohol dataset detected: Using J-Modulated T2 Fit[/cyan]"
+                    )
+                    cache_params["type"] = (
+                        "j_modulated"  # Update cache params for specific type
+                    )
+                    params, fit_curve, residuals, r2, param_errors, outlier_mask = (
+                        Fitter.fit_modulated_t2(delays, amplitudes_fit)
+                    )
+                    week, substance = _get_week_and_substance(path, prefix)
+                    title_prefix = (
+                        f"{week} {substance}".strip()
+                        if week or substance != "mineral-oil"
+                        else ""
+                    )
+                    dataset_name = (
+                        f"{title_prefix} - T2 Analysis (J-Modulated)"
+                        if title_prefix
+                        else "T2 Analysis (J-Modulated)"
+                    )
+                else:
+                    params, fit_curve, residuals, r2, param_errors, outlier_mask = (
+                        Fitter.fit_t2(delays, amplitudes_fit)
+                    )
+                    week, substance = _get_week_and_substance(path, prefix)
+                    title_prefix = (
+                        f"{week} {substance}".strip()
+                        if week or substance != "mineral-oil"
+                        else ""
+                    )
+                    dataset_name = (
+                        f"{title_prefix} - T2 Analysis"
+                        if title_prefix
+                        else "T2 Analysis"
+                    )
+
+            result = AnalysisResult(
+                experiment_type=experiment,
+                dataset_name=dataset_name,
+                params=params,
+                fit_curve=fit_curve,
+                residuals=residuals,
+                r_squared=r2,
+                param_errors=param_errors,
+                metadata={"outlier_mask": outlier_mask}
+                if outlier_mask is not None
+                else {},
+            )
+            CacheManager.set(path, cache_params, result)
+        else:
+            console.print(f"[green]Loaded cached T1/T2 result for {path.name}[/green]")
+        # --- Caching End ---
 
         print_result(result)
         if plot:
@@ -1864,207 +2004,6 @@ def _run_analysis(
         return [
             AnalysisContext(data=aggregated_data, result=result, raw_traces=raw_traces)
         ]
-
-
-def plot_spectrum_fit(freqs, mag_data, result, filepath=None):
-    fig, ax = plt.subplots(figsize=(10, 6))
-    # Convert to kHz
-    freqs_khz = freqs / 1000.0
-    ax.plot(freqs_khz, mag_data, label="Data (Magnitude)", color="black", alpha=0.7)
-    if len(result.fit_curve) > 0:
-        ax.plot(
-            freqs_khz,
-            result.fit_curve,
-            label="Fit (Mag Lorentzian)",
-            color="red",
-            linestyle="--",
-        )
-
-    # Mark peaks
-    if "peaks" in result.params:
-        for p in result.params["peaks"]:
-            f0 = p["f0"] / 1000.0
-            ax.axvline(f0, color="green", linestyle=":", alpha=0.5)
-
-    ax.set_xlabel("Frequency (kHz)")
-    ax.set_ylabel("Magnitude")
-    ax.set_xlim(-4, 4)
-    ax.set_title(f"{result.dataset_name}")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-
-    if filepath:
-        plt.savefig(filepath)
-    plt.close()
-
-
-def plot_hybrid_result(
-    result: HybridAnalysisResult,
-    out_dir: Path,
-    source_path: Optional[Path] = None,
-    prefix: str = "",
-):
-    """
-    Generate plots for Hybrid Analysis:
-    1. Stacked Overview: Time Traces (Left) + Frequency Spectra (Right).
-    2. T2 Decay Fits: Linear (Left) + Log (Right) of Area vs Tau.
-    """
-    import matplotlib.cm as cm
-
-    # --- 1. Stacked Overview (Time + Freq) ---
-    fig_stack, (ax_time, ax_freq) = plt.subplots(1, 2, figsize=(16, 8))
-    cmap = cm.viridis
-
-    # Left: Time Traces
-    time_list = result.time_stack
-    n_files = len(time_list)
-
-    valid_sigs = [np.abs(d.signal) for d in time_list if len(d.signal) > 0]
-    max_sig_t = np.max([np.max(s) for s in valid_sigs]) if valid_sigs else 1.0
-    offset_step_t = max_sig_t * 0.5
-
-    for i, data in enumerate(time_list):
-        sig = np.abs(data.signal)
-        t = data.time
-        color = cmap(i / n_files)
-        ax_time.plot(t, sig + i * offset_step_t, color=color, alpha=0.8)
-
-    ax_time.set_xlabel(f"Time ({time_list[0].metadata.get('time_unit', 's')})")
-    ax_time.set_ylabel("Signal Amplitude (Stacked)")
-    ax_time.set_title("Stacked Time Traces")
-    ax_time.grid(True, alpha=0.3)
-
-    # Right: Frequency Spectra
-    freqs, spectra_list = result.spectra_stack
-    valid_specs = [s for s in spectra_list if len(s) > 0]
-    max_amp_f = np.max([np.max(s) for s in valid_specs]) if valid_specs else 1.0
-    offset_step_f = max_amp_f * 0.2
-
-    for i, spect in enumerate(spectra_list):
-        mag = np.abs(spect)
-        color = cmap(i / n_files)
-        ax_freq.plot(freqs / 1000.0, mag + i * offset_step_f, color=color, alpha=0.8)
-
-    ax_freq.set_xlabel("Frequency (kHz)")
-    ax_freq.set_ylabel("Magnitude (Stacked)")
-    ax_freq.set_xlim(-10, 10)
-    ax_freq.set_title("Stacked Spectra")
-    ax_freq.grid(True, alpha=0.3)
-
-    fig_stack.suptitle(f"Hybrid Analysis Overview: {result.dataset_name}", fontsize=14)
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-
-    # Generate filename using helper if source_path is available
-    if source_path:
-        fname_stack = _generate_plot_filename(
-            source_path, ExperimentType.SPECTRUM, "stacked-overview", prefix
-        )
-    else:
-        fname_stack = (
-            f"{prefix}_stacked_overview.png" if prefix else "stacked_overview.png"
-        )
-    plt.savefig(out_dir / fname_stack)
-    plt.close(fig_stack)
-    console.print(f"Saved {(out_dir / fname_stack).absolute().as_uri()}")
-
-    # --- 2. T2 Decay Fits ---
-    n_peaks = len(result.peak_centers)
-
-    fig_fit, axes = plt.subplots(n_peaks, 2, figsize=(16, 6 * n_peaks), squeeze=False)
-    taus = result.tau_values
-
-    for k in range(n_peaks):
-        areas = result.integrated_areas[k, :]  # Integrated Frequency Space Area
-        fit_res = result.t2_results[k]
-        f0 = result.peak_centers[k]
-
-        # Left: Linear
-        ax_lin = axes[k, 0]
-        ax_lin.scatter(
-            taus, areas, label="Integrated Area", color="blue", s=50, zorder=3
-        )
-
-        t_smooth = np.linspace(min(taus), max(taus), 200)
-        if fit_res.get("T1", 0) > 0:
-            # T1 Fit Visualization
-            from nmr_analysis.analysis.models import t1_model
-
-            y_fit = t1_model(t_smooth, fit_res["M0"], fit_res["T1"], fit_res["alpha"])
-            ax_lin.plot(t_smooth, y_fit, "r--", label="Fit T1", linewidth=2, zorder=2)
-
-            # Right Plot for T1: Also Linear usually!
-            # Mirror Left plot or show residuals or just Linear Fit again
-            ax_log = axes[k, 1]
-            ax_log.scatter(
-                taus, areas, label="Integrated Area", color="blue", s=50, zorder=3
-            )
-            ax_log.plot(t_smooth, y_fit, "r--", label="Fit T1", linewidth=2, zorder=2)
-
-            val = fit_res["T1"]
-            r2 = fit_res.get("r_squared", 0)
-            text_str = rf"$T_1 = {val:.4f}$ s" + "\n" + rf"$R^2 = {r2:.4f}$"
-
-            ax_log.set_yscale("linear")
-            ax_log.set_ylabel("Integrated Area")
-            ax_log.set_title(f"Peak @ {f0:.1f} Hz (Linear T1)")
-
-        elif fit_res.get("T2", 0) > 0:
-            y_fit = t2_decay_model(
-                t_smooth, fit_res["M0"], fit_res["T2"], fit_res["offset"]
-            )
-            ax_lin.plot(t_smooth, y_fit, "r--", label="Fit", linewidth=2, zorder=2)
-
-            # Right: Log
-            ax_log = axes[k, 1]
-            y_fit_log = y_fit
-            valid_y = y_fit_log > 0
-            ax_log.plot(
-                t_smooth[valid_y],
-                y_fit_log[valid_y],
-                "r--",
-                label="Fit",
-                linewidth=2,
-                zorder=2,
-            )
-
-            # Add T2 text
-            val = fit_res["T2"]
-            r2 = fit_res.get("r_squared", 0)
-            text_str = rf"$T_2 = {val:.4f}$ s" + "\n" + rf"$R^2 = {r2:.4f}$"
-
-            ax_log.set_yscale("log")
-            ax_log.set_ylabel("Integrated Area (Log)")
-            ax_log.set_title(f"Peak @ {f0:.1f} Hz (Log)")
-
-        # Common Text Box for Right Plot
-        if fit_res.get("T1", 0) > 0 or fit_res.get("T2", 0) > 0:
-            ax_log.text(
-                0.95,
-                0.95,
-                text_str,
-                transform=ax_log.transAxes,
-                fontsize=12,
-                verticalalignment="top",
-                horizontalalignment="right",
-                bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
-            )
-
-        ax_log.set_xlabel("Delay $\\tau$ (s)")
-        ax_log.grid(True, which="both", alpha=0.5)
-
-    fig_fit.suptitle(f"T2 Decay Analysis: {result.dataset_name}", fontsize=16)
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-
-    # Generate filename using helper if source_path is available
-    if source_path:
-        fname_fit = _generate_plot_filename(
-            source_path, ExperimentType.SPECTRUM, "t2-decay", prefix
-        )
-    else:
-        fname_fit = f"{prefix}_t2_decay.png" if prefix else "t2_decay.png"
-    plt.savefig(out_dir / fname_fit)
-    plt.close(fig_fit)
-    console.print(f"Saved {(out_dir / fname_fit).absolute().as_uri()}")
 
 
 def print_result(result: AnalysisResult):
@@ -2881,7 +2820,7 @@ if __name__ == "__main__":
             plot=True,
             save_plots=True,
             output_dir=Path(__file__).parents[3] / "output" / week,
-            interactive=True,
+            interactive=False,
             flat=True,
         )
     montage(

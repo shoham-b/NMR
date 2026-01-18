@@ -366,7 +366,7 @@ class Fitter:
             )  # Reset if Stage 1 failed to filter
 
         try:
-            popt_stage1, _ = curve_fit(
+            popt_stage1, pcov_stage1 = curve_fit(
                 t2_decay_model,
                 delays_stage1,
                 amplitudes_stage1,
@@ -383,6 +383,7 @@ class Fitter:
             M0_stage1, T2_stage1, offset_stage1 = M0_guess, T2_guess, offset_guess
             # If stage 1 failed, we can't reliably filter stage 2, so keep all
             popt_stage1 = None
+            pcov_stage1 = None
             final_inlier_mask = np.ones_like(
                 delays, dtype=bool
             )  # If Stage 1 fit failed, assume all are inliers for now
@@ -474,8 +475,26 @@ class Fitter:
                 "depth": perr[4],
             }
 
+            # Add Unmodulated T2 Error
+            t2_unmod_err = 0.0
+            if pcov_stage1 is not None:
+                try:
+                    perr_s1 = np.sqrt(np.diag(pcov_stage1))
+                    # popt_stage1 order: M0, T2, offset
+                    t2_unmod_err = perr_s1[1]
+                except Exception:
+                    pass
+            param_errors["T2_unmodulated"] = t2_unmod_err
+
             return (
-                {"M0": M0, "T2": T2, "J": J, "offset": offset, "depth": depth},
+                {
+                    "M0": M0,
+                    "T2": T2,
+                    "J": J,
+                    "offset": offset,
+                    "depth": depth,
+                    "T2_unmodulated": T2_stage1,
+                },
                 fit_curve,
                 residuals,
                 r2,
