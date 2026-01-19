@@ -344,10 +344,17 @@ def analyze(
 
                 sub_experiments = []
                 for sub in item.iterdir():
-                    if not sub.is_dir():
-                        continue
-                    if sub.name.lower() in ALIAS_MAP:
-                        sub_experiments.append(sub)
+                    if sub.is_dir():
+                        if sub.name.lower() in ALIAS_MAP:
+                            sub_experiments.append(sub)
+                    elif sub.is_file() and sub.suffix.lower() in {
+                        ".h5",
+                        ".hdf5",
+                        ".csv",
+                    }:
+                        # Check file stem against aliases (e.g. T2~.csv -> t2~)
+                        if sub.stem.lower() in ALIAS_MAP:
+                            sub_experiments.append(sub)
 
                 if sub_experiments:
                     console.print(
@@ -360,7 +367,9 @@ def analyze(
                     # 1: Others
                     sub_experiments.sort(
                         key=lambda x: 0
-                        if ALIAS_MAP.get(x.name.lower())
+                        if ALIAS_MAP.get(
+                            x.stem.lower() if x.is_file() else x.name.lower()
+                        )
                         in (ExperimentType.T2, "t2", "t2_single")
                         else 1
                     )
@@ -368,7 +377,9 @@ def analyze(
                     current_sample_t2_combined = None
 
                     for sub in sub_experiments:
-                        name_lower = sub.name.lower()
+                        name_lower = (
+                            sub.stem.lower() if sub.is_file() else sub.name.lower()
+                        )
                         exp_type = ALIAS_MAP[name_lower]
 
                         # Check for Water/Diffusion special case recursively
